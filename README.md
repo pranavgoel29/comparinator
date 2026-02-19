@@ -2,6 +2,8 @@
 
 A browser-local Next.js app for comparing selected areas across images and benchmarking many pairs.
 
+Detailed architecture is documented in `/ARCHITECTURE.md`.
+
 ## What it does
 
 - Upload a **source** and **target** image (`png`, `jpeg`, `webp`)
@@ -27,6 +29,26 @@ pnpm dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
+
+## Architecture (current)
+
+- UI orchestration and pages:
+  - `/app/page.tsx` (comparator)
+  - `/app/analytics/page.tsx` (analytics)
+- Comparator feature modules:
+  - `/components/comparator/comparator-app.tsx`
+  - `/components/comparator/use-comparator-worker.ts`
+  - `/components/comparator/use-comparator-session.ts`
+  - `/components/comparator/use-benchmark-suite.ts`
+  - `/components/comparator/model-status-dialog.tsx`
+  - `/components/comparator/benchmark-summary-card.tsx`
+  - `/components/comparator/benchmark-cases-list.tsx`
+- Worker entry + feature modules:
+  - `/workers/embedding.worker.ts`
+  - `/workers/embedding/*`
+- Session persistence:
+  - `/lib/comparator/session-store.ts` (compat shim)
+  - `/lib/comparator/session-store/*`
 
 ## Model/caching notes
 
