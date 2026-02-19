@@ -66,10 +66,10 @@ export type BenchmarkStats = {
 export type ComparatorAnalyticsSnapshot = BenchmarkRunSnapshot | null
 
 export const PRESET_MODEL_IDS: Record<Exclude<BenchmarkPreset, "custom">, string[]> = {
-  fast: ["Xenova/siglip-base-patch16-224"],
+  fast: ["Xenova/dinov2-small"],
   balanced: [
     "Xenova/siglip-base-patch16-224",
-    "onnx-community/siglip2-base-patch16-224-ONNX",
+    "Xenova/dinov2-small",
   ],
   thorough: MODEL_CATALOG.map((model) => model.id),
 }
