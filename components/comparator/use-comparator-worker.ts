@@ -223,6 +223,7 @@ export function useComparatorWorker({ setIsComparing, setRuntimeInfo }: UseCompa
 
   return {
     workerMounted,
+    createWorker: createComparatorWorker,
     modelStatus,
     modelError,
     setModelError,

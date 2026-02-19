@@ -30,10 +30,6 @@ function unique(ids: string[]) {
   return normalizeUniqueModelIds(ids)
 }
 
-function createComparatorWorker() {
-  return new Worker(new URL("../workers/embedding.worker.ts", import.meta.url), { type: "module" })
-}
-
 export function ComparatorApp() {
   const [sourceBitmap, setSourceBitmap] = React.useState<ImageBitmap | null>(null)
   const [targetBitmap, setTargetBitmap] = React.useState<ImageBitmap | null>(null)
@@ -77,6 +73,7 @@ export function ComparatorApp() {
 
   const {
     workerMounted,
+    createWorker,
     modelStatus,
     modelError,
     setModelError,
@@ -148,7 +145,7 @@ export function ComparatorApp() {
     embeddingWeight,
     pixelWeight,
     threshold,
-    createWorker: createComparatorWorker,
+    createWorker,
     setBenchmarkCases,
     setSelectedBenchmarkCaseId,
     setResult,
