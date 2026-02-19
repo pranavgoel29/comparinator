@@ -13,6 +13,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { createDefaultBBox, isBBoxAtLeastMinPixels } from "@/lib/comparator/bbox"
 import { cropImageRegion, fileToImageBitmap, resizeCroppedRegion } from "@/lib/comparator/image"
 import {
+  clearBenchmarkPoolCache,
+  disposeBenchmarkPool,
+  ensureBenchmarkPool,
+  getAdaptiveBenchmarkPoolSize,
+  runBenchmarkPool,
+  type BenchmarkPoolHandle,
+  type BenchmarkTask,
+} from "@/lib/comparator/benchmark-pool"
+import {
   MODEL_CATALOG,
   MODEL_CONFIG,
   modelLabelFromId,
@@ -135,6 +144,13 @@ function presetLabel(preset: BenchmarkPreset) {
   return "Custom"
 }
 
+function createComparatorWorker() {
+  return new Worker(
+    new URL("../../workers/embedding.worker.ts", import.meta.url),
+    { type: "module" }
+  )
+}
+
 export function ComparatorApp() {
   const [sourceBitmap, setSourceBitmap] = React.useState<ImageBitmap | null>(null)
   const [targetBitmap, setTargetBitmap] = React.useState<ImageBitmap | null>(null)
@@ -191,11 +207,15 @@ export function ComparatorApp() {
     reject: (error: Error) => void
   } | null>(null)
   const applyingPresetRef = React.useRef(false)
+  const benchmarkRunIdRef = React.useRef(0)
+  const benchmarkAbortRef = React.useRef<AbortController | null>(null)
+  const benchmarkPoolRef = React.useRef<BenchmarkPoolHandle | null>(null)
 
   const pixelWeight = React.useMemo(
     () => Number((1 - embeddingWeight).toFixed(2)),
     [embeddingWeight]
   )
+  const embeddingRequired = embeddingWeight > 0
 
   const activeModelIds = React.useMemo(() => {
     const base = loadedModelIds.length ? loadedModelIds : selectedModelIds
@@ -327,21 +347,28 @@ export function ComparatorApp() {
 
       return new Promise<CompareResult>((resolve, reject) => {
         pendingCompareRef.current = { resolve, reject }
+        const transferList: Transferable[] = []
+        if (payload.source.rgba.buffer instanceof ArrayBuffer) {
+          transferList.push(payload.source.rgba.buffer)
+        }
+        if (payload.target.rgba.buffer instanceof ArrayBuffer) {
+          transferList.push(payload.target.rgba.buffer)
+        }
 
-        workerRef.current?.postMessage({
-          type: "compare",
-          payload,
-        } satisfies WorkerRequest)
+        workerRef.current?.postMessage(
+          {
+            type: "compare",
+            payload,
+          } satisfies WorkerRequest,
+          transferList
+        )
       })
     },
     []
   )
 
   React.useEffect(() => {
-    const worker = new Worker(
-      new URL("../../workers/embedding.worker.ts", import.meta.url),
-      { type: "module" }
-    )
+    const worker = createComparatorWorker()
 
     workerRef.current = worker
 
@@ -432,6 +459,15 @@ export function ComparatorApp() {
     }
   }, [])
 
+  React.useEffect(() => {
+    return () => {
+      benchmarkAbortRef.current?.abort()
+      disposeBenchmarkPool(benchmarkPoolRef.current)
+      benchmarkPoolRef.current = null
+      benchmarkAbortRef.current = null
+    }
+  }, [])
+
   const sourceDimensions = sourceBitmap
     ? { width: sourceBitmap.width, height: sourceBitmap.height }
     : null
@@ -517,7 +553,7 @@ export function ComparatorApp() {
       )
     }
 
-    if (!activeModelIds.length) {
+    if (embeddingRequired && !activeModelIds.length) {
       throw new Error("No initialized models available for compare.")
     }
 
@@ -541,7 +577,7 @@ export function ComparatorApp() {
         height: targetRegion.height,
         rgba: new Uint8ClampedArray(targetRegion.imageData.data),
       },
-      modelIds: activeModelIds,
+      modelIds: embeddingRequired ? activeModelIds : [],
       weights: {
         embedding: embeddingWeight,
         pixel: pixelWeight,
@@ -556,6 +592,7 @@ export function ComparatorApp() {
   }, [
     activeModelIds,
     embeddingWeight,
+    embeddingRequired,
     maxCompareSide,
     minAreaPixels,
     pixelWeight,
@@ -566,7 +603,7 @@ export function ComparatorApp() {
   ])
 
   const runCompare = React.useCallback(async () => {
-    if (modelStatus !== "ready") {
+    if (embeddingRequired && modelStatus !== "ready") {
       setModelError("Models are still loading. Wait for ready status.")
       return
     }
@@ -575,6 +612,7 @@ export function ComparatorApp() {
       const { sourceRegion, targetRegion, request } =
         buildCompareRequestFromActivePair()
 
+      setSelectedBenchmarkCaseId(null)
       setSourceCropUrl(sourceRegion.dataUrl)
       setTargetCropUrl(targetRegion.dataUrl)
       setIsComparing(true)
@@ -590,7 +628,7 @@ export function ComparatorApp() {
     } finally {
       setIsComparing(false)
     }
-  }, [buildCompareRequestFromActivePair, executeCompare, modelStatus])
+  }, [buildCompareRequestFromActivePair, embeddingRequired, executeCompare, modelStatus])
 
   const toggleModel = React.useCallback(
     (modelId: string, checked: boolean) => {
@@ -626,12 +664,20 @@ export function ComparatorApp() {
     [markPresetAsCustom]
   )
 
-  const clearRuntimeCache = React.useCallback(() => {
+  const clearRuntimeCache = React.useCallback(async () => {
     if (!workerRef.current) {
       setModelError("Worker is not ready yet.")
       return
     }
     workerRef.current.postMessage({ type: "clear-cache" } satisfies WorkerRequest)
+    try {
+      await clearBenchmarkPoolCache(benchmarkPoolRef.current)
+      setRuntimeInfo("Runtime cache cleared for live and benchmark workers.")
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to clear benchmark cache."
+      setModelError(message)
+    }
   }, [])
 
   const addCurrentPairToBenchmark = React.useCallback(() => {
@@ -684,85 +730,176 @@ export function ComparatorApp() {
       return
     }
 
-    if (!activeModelIds.length) {
+    if (embeddingRequired && modelStatus !== "ready") {
+      setModelError("Models are still loading. Wait for ready status.")
+      return
+    }
+
+    if (embeddingRequired && !activeModelIds.length) {
       setModelError("No initialized models available for benchmark.")
       return
     }
 
+    benchmarkAbortRef.current?.abort()
+    const abortController = new AbortController()
+    benchmarkAbortRef.current = abortController
+    const runId = benchmarkRunIdRef.current + 1
+    benchmarkRunIdRef.current = runId
+
     setIsRunningBenchmark(true)
     setModelError(null)
-    setRuntimeInfo(null)
-
+    const modelIdsForRun = embeddingRequired ? activeModelIds : []
     const casesSnapshot = [...benchmarkCases]
+    const caseLookup = new Map(casesSnapshot.map((item) => [item.id, item]))
+    const caseIds = new Set(casesSnapshot.map((item) => item.id))
+    const poolSize = getAdaptiveBenchmarkPoolSize(casesSnapshot.length)
 
-    for (const item of casesSnapshot) {
+    const tasks: BenchmarkTask[] = casesSnapshot.map((item) => ({
+      id: item.id,
+      request: {
+        source: item.sourcePayload,
+        target: item.targetPayload,
+        modelIds: modelIdsForRun,
+        weights: {
+          embedding: embeddingWeight,
+          pixel: pixelWeight,
+        },
+      },
+    }))
+
+    try {
+      const pool = await ensureBenchmarkPool({
+        existingPool: benchmarkPoolRef.current,
+        modelIds: modelIdsForRun,
+        needsEmbedding: embeddingRequired,
+        poolSize,
+        createWorker: createComparatorWorker,
+        signal: abortController.signal,
+      })
+      benchmarkPoolRef.current = pool
+      const activeWorkers = Math.max(
+        1,
+        Math.min(casesSnapshot.length, pool.workers.length)
+      )
+
+      setRuntimeInfo(
+        embeddingRequired
+          ? `Benchmark started with ${activeWorkers} worker${activeWorkers > 1 ? "s" : ""} (models duplicated per worker).`
+          : `Benchmark started with ${activeWorkers} worker${activeWorkers > 1 ? "s" : ""} in pixel-only mode.`
+      )
       setBenchmarkCases((previous) =>
         previous.map((entry) =>
-          entry.id === item.id
+          caseIds.has(entry.id)
             ? {
                 ...entry,
-                status: "running",
+                status: "idle",
+                result: null,
                 error: null,
+                durationMs: null,
               }
             : entry
         )
       )
 
-      const started = performance.now()
-
-      try {
-        const nextResult = await executeCompare({
-          source: item.sourcePayload,
-          target: item.targetPayload,
-          modelIds: activeModelIds,
-          weights: {
-            embedding: embeddingWeight,
-            pixel: pixelWeight,
+      await runBenchmarkPool({
+        tasks,
+        pool,
+        signal: abortController.signal,
+        callbacks: {
+          onTaskStart: (taskId) => {
+            if (benchmarkRunIdRef.current !== runId) {
+              return
+            }
+            setBenchmarkCases((previous) =>
+              previous.map((entry) =>
+                entry.id === taskId
+                  ? {
+                      ...entry,
+                      status: "running",
+                      error: null,
+                    }
+                  : entry
+              )
+            )
           },
-        })
+          onTaskComplete: (taskId, nextResult, durationMs) => {
+            if (benchmarkRunIdRef.current !== runId) {
+              return
+            }
+            setBenchmarkCases((previous) =>
+              previous.map((entry) =>
+                entry.id === taskId
+                  ? {
+                      ...entry,
+                      status: "done",
+                      result: nextResult,
+                      error: null,
+                      durationMs,
+                    }
+                  : entry
+              )
+            )
 
-        const durationMs = Math.round(performance.now() - started)
+            const taskCase = caseLookup.get(taskId)
+            if (taskCase) {
+              setResult(nextResult)
+              setSourceCropUrl(taskCase.sourceDataUrl)
+              setTargetCropUrl(taskCase.targetDataUrl)
+            }
+          },
+          onTaskError: (taskId, error, durationMs) => {
+            if (benchmarkRunIdRef.current !== runId) {
+              return
+            }
+            setBenchmarkCases((previous) =>
+              previous.map((entry) =>
+                entry.id === taskId
+                  ? {
+                      ...entry,
+                      status: "error",
+                      error,
+                      durationMs,
+                    }
+                  : entry
+              )
+            )
+          },
+        },
+      })
 
-        setBenchmarkCases((previous) =>
-          previous.map((entry) =>
-            entry.id === item.id
-              ? {
-                  ...entry,
-                  status: "done",
-                  result: nextResult,
-                  durationMs,
-                }
-              : entry
-          )
-        )
+      if (benchmarkRunIdRef.current !== runId) {
+        return
+      }
 
-        setResult(nextResult)
-        setSourceCropUrl(item.sourceDataUrl)
-        setTargetCropUrl(item.targetDataUrl)
-      } catch (error) {
+      setRuntimeInfo(
+        `Benchmark completed with ${activeWorkers} worker${activeWorkers > 1 ? "s" : ""}.`
+      )
+    } catch (error) {
+      if (benchmarkRunIdRef.current !== runId) {
+        return
+      }
+
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setRuntimeInfo("Benchmark run cancelled.")
+      } else {
         const message =
           error instanceof Error ? error.message : "Benchmark compare failed."
-
-        setBenchmarkCases((previous) =>
-          previous.map((entry) =>
-            entry.id === item.id
-              ? {
-                  ...entry,
-                  status: "error",
-                  error: message,
-                }
-              : entry
-          )
-        )
+        setModelError(message)
+      }
+    } finally {
+      if (benchmarkRunIdRef.current === runId) {
+        setIsRunningBenchmark(false)
+        if (benchmarkAbortRef.current === abortController) {
+          benchmarkAbortRef.current = null
+        }
       }
     }
-
-    setIsRunningBenchmark(false)
   }, [
     activeModelIds,
     benchmarkCases,
+    embeddingRequired,
     embeddingWeight,
-    executeCompare,
+    modelStatus,
     pixelWeight,
   ])
 
@@ -776,11 +913,17 @@ export function ComparatorApp() {
   }, [])
 
   const canCompare =
-    modelStatus === "ready" &&
+    (!embeddingRequired || modelStatus === "ready") &&
     !isComparing &&
     !isRunningBenchmark &&
-    activeModelIds.length > 0 &&
+    (!embeddingRequired || activeModelIds.length > 0) &&
     Boolean(sourceBitmap && targetBitmap && sourceBBox && targetBBox)
+  const canRunBenchmark =
+    !isComparing &&
+    !isRunningBenchmark &&
+    benchmarkCases.length > 0 &&
+    (!embeddingRequired ||
+      (modelStatus === "ready" && activeModelIds.length > 0))
 
   const displayedResult = selectedBenchmarkCase?.result ?? result
   const displayedSourceCropUrl = selectedBenchmarkCase?.sourceDataUrl ?? sourceCropUrl
@@ -1219,9 +1362,18 @@ export function ComparatorApp() {
                 </div>
               </div>
               {selectedBenchmarkCase ? (
-                <p className="rounded-md border border-primary/30 bg-primary/10 px-2 py-1 text-xs text-foreground">
-                  Showing in Results: {selectedBenchmarkCase.label}
-                </p>
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/10 px-2 py-1">
+                  <p className="text-xs text-foreground">
+                    Showing in Results: {selectedBenchmarkCase.label}
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setSelectedBenchmarkCaseId(null)}
+                  >
+                    Show live compare
+                  </Button>
+                </div>
               ) : null}
 
               <div className="space-y-1">
@@ -1305,7 +1457,7 @@ export function ComparatorApp() {
             <div className="flex flex-wrap gap-2">
               <Button
                 onClick={runBenchmarkSuite}
-                disabled={isComparing || isRunningBenchmark || !benchmarkCases.length}
+                disabled={!canRunBenchmark}
               >
                 {isRunningBenchmark ? "Running benchmark..." : "Run benchmark suite"}
               </Button>
@@ -1421,7 +1573,9 @@ export function ComparatorApp() {
                                   Embedding
                                 </p>
                                 <p className="text-sm font-semibold text-foreground">
-                                  {item.result.embeddingSimilarity.toFixed(4)}
+                                  {item.result.compute.embeddingSkipped
+                                    ? "skipped"
+                                    : item.result.embeddingSimilarity.toFixed(4)}
                                 </p>
                               </div>
                               <div className="rounded border border-border bg-background/80 px-2 py-2">
@@ -1429,7 +1583,9 @@ export function ComparatorApp() {
                                   Pixel
                                 </p>
                                 <p className="text-sm font-semibold text-foreground">
-                                  {item.result.pixelSimilarity.toFixed(4)}
+                                  {item.result.compute.pixelSkipped
+                                    ? "skipped"
+                                    : item.result.pixelSimilarity.toFixed(4)}
                                 </p>
                               </div>
                               <div className="rounded border border-border bg-background/80 px-2 py-2">

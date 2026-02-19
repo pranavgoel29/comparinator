@@ -96,21 +96,36 @@ function decisionStrength(margin: number) {
   }
 }
 
-function ScoreRow({ label, value }: { label: string; value: number }) {
+function ScoreRow({
+  label,
+  value,
+  skipped = false,
+}: {
+  label: string
+  value: number
+  skipped?: boolean
+}) {
   return (
     <div className="space-y-1.5 rounded-md border border-border bg-muted/30 p-3">
       <div className="flex items-center justify-between text-xs uppercase tracking-[0.14em] text-muted-foreground">
         <span>{label}</span>
         <span className="text-base font-semibold tracking-normal text-foreground">
-          {value.toFixed(4)}
+          {skipped ? "skipped" : value.toFixed(4)}
         </span>
       </div>
       <div className="h-2 overflow-hidden rounded bg-muted">
         <div
-          className="h-full rounded bg-primary transition-all duration-500"
-          style={{ width: `${Math.max(0, Math.min(100, value * 100))}%` }}
+          className={`h-full rounded transition-all duration-500 ${
+            skipped ? "bg-muted-foreground/40" : "bg-primary"
+          }`}
+          style={{ width: `${Math.max(0, Math.min(100, skipped ? 0 : value * 100))}%` }}
         />
       </div>
+      {skipped ? (
+        <p className="text-[11px] text-muted-foreground">
+          Not computed because this weight is set to 0.
+        </p>
+      ) : null}
     </div>
   )
 }
@@ -141,6 +156,8 @@ export function ResultsPanel({
       )
     : []
   const limitingModel = sortedModelScores[0] ?? null
+  const embeddingSkipped = Boolean(result?.compute.embeddingSkipped)
+  const pixelSkipped = Boolean(result?.compute.pixelSkipped)
 
   return (
     <Card className="border-border bg-card shadow-sm">
@@ -224,7 +241,9 @@ export function ResultsPanel({
                       Embedding
                     </p>
                     <p className="text-sm font-semibold text-foreground">
-                      {formatPercent(result.embeddingSimilarity)}
+                      {embeddingSkipped
+                        ? "Skipped (weight 0)"
+                        : formatPercent(result.embeddingSimilarity)}
                     </p>
                   </div>
                   <div className="rounded-md border border-border bg-background/85 px-3 py-2">
@@ -232,7 +251,9 @@ export function ResultsPanel({
                       Pixel
                     </p>
                     <p className="text-sm font-semibold text-foreground">
-                      {formatPercent(result.pixelSimilarity)}
+                      {pixelSkipped
+                        ? "Skipped (weight 0)"
+                        : formatPercent(result.pixelSimilarity)}
                     </p>
                   </div>
                   <div className="rounded-md border border-border bg-background/85 px-3 py-2">
@@ -250,8 +271,13 @@ export function ResultsPanel({
               <ScoreRow
                 label="Ensemble embedding (minimum)"
                 value={result.embeddingSimilarity}
+                skipped={embeddingSkipped}
               />
-              <ScoreRow label="Pixel similarity" value={result.pixelSimilarity} />
+              <ScoreRow
+                label="Pixel similarity"
+                value={result.pixelSimilarity}
+                skipped={pixelSkipped}
+              />
               <ScoreRow
                 label="Ensemble hybrid (minimum)"
                 value={result.hybridSimilarity}
@@ -272,8 +298,13 @@ export function ResultsPanel({
                   </p>
                   <p className="text-muted-foreground">
                     total <span className="font-semibold text-foreground">{result.timingsMs.total} ms</span> | pixel{" "}
-                    <span className="font-semibold text-foreground">{result.timingsMs.pixel} ms</span> | embedding{" "}
-                    <span className="font-semibold text-foreground">{result.timingsMs.embedding} ms</span>
+                    <span className="font-semibold text-foreground">
+                      {result.timingsMs.pixel} ms{pixelSkipped ? " (skipped)" : ""}
+                    </span>{" "}
+                    | embedding{" "}
+                    <span className="font-semibold text-foreground">
+                      {result.timingsMs.embedding} ms{embeddingSkipped ? " (skipped)" : ""}
+                    </span>
                   </p>
                 </div>
                 <div className="rounded border border-border bg-muted/20 p-2">
@@ -311,7 +342,12 @@ export function ResultsPanel({
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
                   Per-model details ({result.aggregation})
                 </p>
-                {limitingModel ? (
+                {embeddingSkipped ? (
+                  <p className="text-xs text-muted-foreground">
+                    Semantic model stage was skipped because embedding weight is 0.
+                  </p>
+                ) : null}
+                {!embeddingSkipped && limitingModel ? (
                   <p className="text-xs text-muted-foreground">
                     Limiting model:{" "}
                     <span className="font-semibold text-foreground">
@@ -320,41 +356,43 @@ export function ResultsPanel({
                     with hybrid {limitingModel.hybridSimilarity.toFixed(4)}. Conservative mode uses the lowest model score.
                   </p>
                 ) : null}
-                <div className="space-y-2">
-                  {sortedModelScores.map((item) => (
-                    <div
-                      key={item.modelId}
-                      className="space-y-1 rounded border border-border bg-background px-2 py-2 text-xs"
-                    >
-                      <p className="font-medium text-foreground">
-                        {modelLabelFromId(item.modelId)}
-                        {limitingModel?.modelId === item.modelId ? " (limiting)" : ""}
-                      </p>
-                      <p className="text-muted-foreground">
-                        embedding {item.embeddingSimilarity.toFixed(4)} | hybrid {item.hybridSimilarity.toFixed(4)}
-                      </p>
-                      <p className="text-muted-foreground">
-                        latency {item.latencyMs} ms | embedding cache{" "}
-                        {item.embeddingCacheHit ? "hit" : "miss"}
-                      </p>
-                      <div className="h-1.5 overflow-hidden rounded bg-muted">
-                        <div
-                          className={`h-full rounded transition-all duration-500 ${
-                            limitingModel?.modelId === item.modelId
-                              ? "bg-amber-500"
-                              : "bg-primary"
-                          }`}
-                          style={{
-                            width: `${Math.max(
-                              0,
-                              Math.min(100, item.hybridSimilarity * 100)
-                            )}%`,
-                          }}
-                        />
+                {!embeddingSkipped ? (
+                  <div className="space-y-2">
+                    {sortedModelScores.map((item) => (
+                      <div
+                        key={item.modelId}
+                        className="space-y-1 rounded border border-border bg-background px-2 py-2 text-xs"
+                      >
+                        <p className="font-medium text-foreground">
+                          {modelLabelFromId(item.modelId)}
+                          {limitingModel?.modelId === item.modelId ? " (limiting)" : ""}
+                        </p>
+                        <p className="text-muted-foreground">
+                          embedding {item.embeddingSimilarity.toFixed(4)} | hybrid {item.hybridSimilarity.toFixed(4)}
+                        </p>
+                        <p className="text-muted-foreground">
+                          latency {item.latencyMs} ms | embedding cache{" "}
+                          {item.embeddingCacheHit ? "hit" : "miss"}
+                        </p>
+                        <div className="h-1.5 overflow-hidden rounded bg-muted">
+                          <div
+                            className={`h-full rounded transition-all duration-500 ${
+                              limitingModel?.modelId === item.modelId
+                                ? "bg-amber-500"
+                                : "bg-primary"
+                            }`}
+                            style={{
+                              width: `${Math.max(
+                                0,
+                                Math.min(100, item.hybridSimilarity * 100)
+                              )}%`,
+                            }}
+                          />
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : (

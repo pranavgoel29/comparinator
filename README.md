@@ -39,8 +39,13 @@ Open [http://localhost:3000](http://localhost:3000).
 - Runtime comparison cache is in-memory for the current tab/session:
   - Pixel pair cache
   - Per-model embedding cache
+- Benchmark workers are reused across runs for the same model setup, so repeated suites can hit cache instead of recomputing.
+- Weight-zero short-circuit is enabled:
+  - If embedding weight is `0`, semantic model inference is skipped.
+  - If pixel weight is `0`, pixel similarity is skipped.
 - Re-running the same benchmark cases is typically faster due to cache hits.
 - Use `Clear runtime cache` in the UI when you want cold-run behavior again.
+- Benchmark suite uses an adaptive worker pool (`1..3`) to process cases concurrently.
 
 ## SigLIP notes
 
@@ -53,5 +58,6 @@ Open [http://localhost:3000](http://localhost:3000).
 
 - First compare can take noticeable time while model assets download.
 - Very large images increase memory use; compare-size control helps cap processing cost.
-- Benchmark suite currently runs sequentially on one worker for stable memory usage.
+- Benchmark pool duplicates model memory per worker by design; use fewer models or lower compare size on lower-memory devices.
+- Changing model set/preset resets benchmark worker caches for correctness.
 - Runtime cache is not persisted across tab refreshes in this version.

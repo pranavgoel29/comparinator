@@ -10,7 +10,7 @@ export type CompareImagePayload = {
 export type CompareRequest = {
   source: CompareImagePayload
   target: CompareImagePayload
-  modelIds: string[]
+  modelIds: string[] // may be empty in pixel-only mode (embedding weight 0)
   weights: CompareWeights
 }
 
@@ -31,6 +31,10 @@ export type CompareResult = {
   embeddingSimilarity: number // 0..1
   pixelSimilarity: number // 0..1
   hybridSimilarity: number // 0..1
+  compute: {
+    embeddingSkipped: boolean
+    pixelSkipped: boolean
+  }
   aggregation: "minimum-across-models"
   usedWeights: CompareWeights
   perModelScores: PerModelScore[]

@@ -294,8 +294,11 @@ async function compareRegions(
   weights: CompareWeights
 ): Promise<CompareResult> {
   const totalStarted = nowMs()
+  const normalizedWeights = normalizeWeights(weights)
+  const embeddingRequired = normalizedWeights.embedding > 0
+  const pixelRequired = normalizedWeights.pixel > 0
   const ids = uniqueModelIds(modelIds)
-  if (!ids.length) {
+  if (embeddingRequired && !ids.length) {
     throw new Error("Select at least one model before compare.")
   }
 
@@ -318,78 +321,97 @@ async function compareRegions(
     }
     return targetRawImagePromise
   }
-  const normalizedWeights = normalizeWeights(weights)
   const pixelStarted = nowMs()
-  let pixel = getCachedValue(pixelCache, sourceTargetPairKey)
-  const pixelCacheHit = typeof pixel === "number"
+  let pixelSimilarityScore = 0
+  let pixelCacheHit = false
 
-  if (typeof pixel !== "number") {
-    const sourceImageData = imageDataFromPayload(source)
-    const targetImageData = imageDataFromPayload(target)
-    pixel = pixelSimilarity(sourceImageData, targetImageData)
-    setCachedValue(pixelCache, sourceTargetPairKey, pixel, PIXEL_CACHE_LIMIT)
-  }
-  const pixelSimilarityScore = typeof pixel === "number" ? pixel : 0
+  if (pixelRequired) {
+    let pixel = getCachedValue(pixelCache, sourceTargetPairKey)
+    pixelCacheHit = typeof pixel === "number"
 
-  const pixelTimingMs = elapsedMs(pixelStarted)
-  const embeddingStarted = nowMs()
-  const cacheCounter = { embeddingHits: 0, embeddingMisses: 0 }
-
-  const perModelSettled = await Promise.allSettled(
-    ids.map((modelId) =>
-      compareWithModel(
-        modelId,
-        sourceImageKey,
-        targetImageKey,
-        getSourceRawImage,
-        getTargetRawImage,
-        pixelSimilarityScore,
-        normalizedWeights,
-        cacheCounter
-      )
-    )
-  )
-
-  const perModelScores: PerModelScore[] = []
-  const errors: string[] = []
-
-  for (let index = 0; index < perModelSettled.length; index += 1) {
-    const settled = perModelSettled[index]
-    const modelId = ids[index]
-
-    if (settled.status === "fulfilled") {
-      perModelScores.push(settled.value)
-      continue
+    if (typeof pixel !== "number") {
+      const sourceImageData = imageDataFromPayload(source)
+      const targetImageData = imageDataFromPayload(target)
+      pixel = pixelSimilarity(sourceImageData, targetImageData)
+      setCachedValue(pixelCache, sourceTargetPairKey, pixel, PIXEL_CACHE_LIMIT)
     }
 
-    const reason =
-      settled.reason instanceof Error
-        ? settled.reason.message
-        : "Model compare failed"
-
-    errors.push(`${modelId}: ${reason}`)
+    pixelSimilarityScore = typeof pixel === "number" ? pixel : 0
   }
 
-  if (!perModelScores.length) {
-    throw new Error(`All selected models failed. ${errors.join(" | ")}`)
-  }
-
-  const embeddingSimilarity = Math.min(
-    ...perModelScores.map((item) => item.embeddingSimilarity)
+  const pixelTimingMs = pixelRequired ? elapsedMs(pixelStarted) : 0
+  const embeddingStarted = nowMs()
+  const cacheCounter = { embeddingHits: 0, embeddingMisses: 0 }
+  const perModelScores: PerModelScore[] = []
+  let embeddingSimilarityScore = 0
+  let hybrid = hybridSimilarity(
+    embeddingSimilarityScore,
+    pixelSimilarityScore,
+    normalizedWeights
   )
-  const hybrid = Math.min(...perModelScores.map((item) => item.hybridSimilarity))
+
+  if (embeddingRequired) {
+    const perModelSettled = await Promise.allSettled(
+      ids.map((modelId) =>
+        compareWithModel(
+          modelId,
+          sourceImageKey,
+          targetImageKey,
+          getSourceRawImage,
+          getTargetRawImage,
+          pixelSimilarityScore,
+          normalizedWeights,
+          cacheCounter
+        )
+      )
+    )
+
+    const errors: string[] = []
+
+    for (let index = 0; index < perModelSettled.length; index += 1) {
+      const settled = perModelSettled[index]
+      const modelId = ids[index]
+
+      if (settled.status === "fulfilled") {
+        perModelScores.push(settled.value)
+        continue
+      }
+
+      const reason =
+        settled.reason instanceof Error
+          ? settled.reason.message
+          : "Model compare failed"
+
+      errors.push(`${modelId}: ${reason}`)
+    }
+
+    if (!perModelScores.length) {
+      throw new Error(`All selected models failed. ${errors.join(" | ")}`)
+    }
+
+    embeddingSimilarityScore = Math.min(
+      ...perModelScores.map((item) => item.embeddingSimilarity)
+    )
+    hybrid = Math.min(...perModelScores.map((item) => item.hybridSimilarity))
+  }
+
+  const embeddingTimingMs = embeddingRequired ? elapsedMs(embeddingStarted) : 0
 
   return {
-    embeddingSimilarity,
+    embeddingSimilarity: embeddingSimilarityScore,
     pixelSimilarity: pixelSimilarityScore,
     hybridSimilarity: hybrid,
+    compute: {
+      embeddingSkipped: !embeddingRequired,
+      pixelSkipped: !pixelRequired,
+    },
     aggregation: "minimum-across-models",
     usedWeights: normalizedWeights,
     perModelScores,
     timingsMs: {
       total: elapsedMs(totalStarted),
       pixel: pixelTimingMs,
-      embedding: elapsedMs(embeddingStarted),
+      embedding: embeddingTimingMs,
     },
     cacheStats: {
       pixelCacheHit,
@@ -425,7 +447,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         !payload.target.height ||
         !payload.source.rgba?.length ||
         !payload.target.rgba?.length ||
-        !payload?.modelIds?.length ||
+        !Array.isArray(payload?.modelIds) ||
         !payload?.weights
       ) {
         throw new Error("Invalid compare payload.")

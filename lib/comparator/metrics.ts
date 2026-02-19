@@ -229,19 +229,25 @@ export function hybridSimilarity(
 ) {
   const embeddingWeight = weights?.embedding ?? DEFAULT_EMBEDDING_WEIGHT
   const pixelWeight = weights?.pixel ?? DEFAULT_PIXEL_WEIGHT
+  const embeddingScore = clamp01(embedding)
+  const pixelScore = clamp01(pixel)
+
+  if (embeddingWeight <= 0 && pixelWeight > 0) {
+    return pixelScore
+  }
+
+  if (pixelWeight <= 0 && embeddingWeight > 0) {
+    return embeddingScore
+  }
 
   const totalWeight = embeddingWeight + pixelWeight
   if (!totalWeight) {
     return 0
   }
 
-  const score =
-    (clamp01(embedding) * embeddingWeight + clamp01(pixel) * pixelWeight) /
-    totalWeight
-
-  const disagreementPenalty = Math.abs(clamp01(embedding) - clamp01(pixel)) * 0.2
-  const geometric = Math.sqrt(clamp01(embedding) * clamp01(pixel))
-  return clamp01(score * 0.65 + geometric * 0.35 - disagreementPenalty)
+  return clamp01(
+    (embeddingScore * embeddingWeight + pixelScore * pixelWeight) / totalWeight
+  )
 }
 
 export function isPass(score: number, threshold: number) {
