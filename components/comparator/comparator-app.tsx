@@ -40,6 +40,8 @@ type BenchmarkCase = {
   targetName: string
   sourceDataUrl: string
   targetDataUrl: string
+  sourcePayload: CompareRequest["source"]
+  targetPayload: CompareRequest["target"]
   status: BenchmarkCaseStatus
   result: CompareResult | null
   error: string | null
@@ -529,8 +531,16 @@ export function ComparatorApp() {
     )
 
     const request: CompareRequest = {
-      sourceDataUrl: sourceRegion.dataUrl,
-      targetDataUrl: targetRegion.dataUrl,
+      source: {
+        width: sourceRegion.width,
+        height: sourceRegion.height,
+        rgba: new Uint8ClampedArray(sourceRegion.imageData.data),
+      },
+      target: {
+        width: targetRegion.width,
+        height: targetRegion.height,
+        rgba: new Uint8ClampedArray(targetRegion.imageData.data),
+      },
       modelIds: activeModelIds,
       weights: {
         embedding: embeddingWeight,
@@ -626,7 +636,7 @@ export function ComparatorApp() {
 
   const addCurrentPairToBenchmark = React.useCallback(() => {
     try {
-      const { sourceRegion, targetRegion } = buildCompareRequestFromActivePair()
+      const { sourceRegion, targetRegion, request } = buildCompareRequestFromActivePair()
 
       const sourceName = sourceFileName || "source-image"
       const targetName = targetFileName || "target-image"
@@ -639,6 +649,16 @@ export function ComparatorApp() {
         targetName,
         sourceDataUrl: sourceRegion.dataUrl,
         targetDataUrl: targetRegion.dataUrl,
+        sourcePayload: {
+          width: request.source.width,
+          height: request.source.height,
+          rgba: new Uint8ClampedArray(request.source.rgba),
+        },
+        targetPayload: {
+          width: request.target.width,
+          height: request.target.height,
+          rgba: new Uint8ClampedArray(request.target.rgba),
+        },
         status: "idle",
         result: null,
         error: null,
@@ -692,8 +712,8 @@ export function ComparatorApp() {
 
       try {
         const nextResult = await executeCompare({
-          sourceDataUrl: item.sourceDataUrl,
-          targetDataUrl: item.targetDataUrl,
+          source: item.sourcePayload,
+          target: item.targetPayload,
           modelIds: activeModelIds,
           weights: {
             embedding: embeddingWeight,

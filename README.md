@@ -35,6 +35,7 @@ Open [http://localhost:3000](http://localhost:3000).
 - Available model options now include CLIP Base Patch32, CLIP Base Patch16, CLIP Large Patch14, and SigLIP Base Patch16.
 - On first run, model files are downloaded in the browser and then cached by browser storage.
 - Comparison runs in a dedicated Web Worker to keep the UI responsive.
+- Compare payloads are sent to the worker as raw RGBA typed arrays (not base64 data URLs) to reduce serialization overhead.
 - Runtime comparison cache is in-memory for the current tab/session:
   - Pixel pair cache
   - Per-model embedding cache

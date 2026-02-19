@@ -5,6 +5,7 @@ import { RawImage, env, pipeline } from "@huggingface/transformers"
 import { MODEL_CONFIG } from "@/lib/comparator/model-config"
 import { cosineSimilarity, hybridSimilarity, pixelSimilarity } from "@/lib/comparator/metrics"
 import type {
+  CompareImagePayload,
   CompareWeights,
   CompareResult,
   PerModelScore,
@@ -18,11 +19,6 @@ type FeatureExtractor = (
   input: unknown,
   options?: Record<string, unknown>
 ) => Promise<unknown>
-
-type DecodedImage = {
-  bitmap: ImageBitmap
-  rawImage: RawImage
-}
 
 const extractorPromises = new Map<string, Promise<FeatureExtractor>>()
 const embeddingCache = new Map<string, number[]>()
@@ -54,10 +50,10 @@ function elapsedMs(started: number) {
   return Math.max(0, Math.round(nowMs() - started))
 }
 
-function hashString(value: string) {
+function hashBytes(bytes: Uint8ClampedArray) {
   let hash = 2166136261
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index)
+  for (let index = 0; index < bytes.length; index += 1) {
+    hash ^= bytes[index]
     hash = Math.imul(hash, 16777619)
   }
   return (hash >>> 0).toString(36)
@@ -167,35 +163,22 @@ async function initModels(modelIds: string[]) {
   return { loadedModelIds, failedModels }
 }
 
-async function decodeDataUrl(dataUrl: string): Promise<DecodedImage> {
-  const response = await fetch(dataUrl)
-  if (!response.ok) {
-    throw new Error("Could not decode image data URL.")
-  }
-
-  const blob = await response.blob()
-  const [bitmap, rawImage] = await Promise.all([
-    createImageBitmap(blob),
-    RawImage.fromBlob(blob),
-  ])
-
-  return { bitmap, rawImage }
+function imageDataFromPayload(payload: CompareImagePayload) {
+  const rgba = new Uint8ClampedArray(payload.rgba)
+  return new ImageData(rgba, payload.width, payload.height)
 }
 
-function imageDataFromBitmap(
-  bitmap: ImageBitmap,
-  width = bitmap.width,
-  height = bitmap.height
-) {
-  const canvas = new OffscreenCanvas(width, height)
+async function rawImageFromPayload(payload: CompareImagePayload) {
+  const canvas = new OffscreenCanvas(payload.width, payload.height)
   const ctx = canvas.getContext("2d")
 
   if (!ctx) {
     throw new Error("Could not initialize worker canvas context.")
   }
 
-  ctx.drawImage(bitmap, 0, 0, width, height)
-  return ctx.getImageData(0, 0, width, height)
+  ctx.putImageData(imageDataFromPayload(payload), 0, 0)
+  const blob = await canvas.convertToBlob({ type: "image/png" })
+  return RawImage.fromBlob(blob)
 }
 
 function viewToNumberArray(view: ArrayBufferView): number[] {
@@ -305,8 +288,8 @@ async function compareWithModel(
 }
 
 async function compareRegions(
-  sourceDataUrl: string,
-  targetDataUrl: string,
+  source: CompareImagePayload,
+  target: CompareImagePayload,
   modelIds: string[],
   weights: CompareWeights
 ): Promise<CompareResult> {
@@ -316,139 +299,103 @@ async function compareRegions(
     throw new Error("Select at least one model before compare.")
   }
 
-  const sourceImageKey = hashString(sourceDataUrl)
-  const targetImageKey = hashString(targetDataUrl)
+  const sourceImageKey = hashBytes(source.rgba)
+  const targetImageKey = hashBytes(target.rgba)
   const sourceTargetPairKey = `${sourceImageKey}|${targetImageKey}`
-  let sourceDecodedPromise: Promise<DecodedImage> | null = null
-  let targetDecodedPromise: Promise<DecodedImage> | null = null
+  let sourceRawImagePromise: Promise<RawImage> | null = null
+  let targetRawImagePromise: Promise<RawImage> | null = null
 
-  const ensureSourceDecoded = () => {
-    if (!sourceDecodedPromise) {
-      sourceDecodedPromise = decodeDataUrl(sourceDataUrl)
+  const getSourceRawImage = () => {
+    if (!sourceRawImagePromise) {
+      sourceRawImagePromise = rawImageFromPayload(source)
     }
-    return sourceDecodedPromise
+    return sourceRawImagePromise
   }
 
-  const ensureTargetDecoded = () => {
-    if (!targetDecodedPromise) {
-      targetDecodedPromise = decodeDataUrl(targetDataUrl)
+  const getTargetRawImage = () => {
+    if (!targetRawImagePromise) {
+      targetRawImagePromise = rawImageFromPayload(target)
     }
-    return targetDecodedPromise
+    return targetRawImagePromise
   }
-
-  const getSourceRawImage = async () => (await ensureSourceDecoded()).rawImage
-  const getTargetRawImage = async () => (await ensureTargetDecoded()).rawImage
   const normalizedWeights = normalizeWeights(weights)
   const pixelStarted = nowMs()
   let pixel = getCachedValue(pixelCache, sourceTargetPairKey)
   const pixelCacheHit = typeof pixel === "number"
 
-  try {
-    if (typeof pixel !== "number") {
-      const [sourceDecoded, targetDecoded] = await Promise.all([
-        ensureSourceDecoded(),
-        ensureTargetDecoded(),
-      ])
-      const sourceImageData = imageDataFromBitmap(sourceDecoded.bitmap)
-      const targetImageData = imageDataFromBitmap(
-        targetDecoded.bitmap,
-        sourceImageData.width,
-        sourceImageData.height
-      )
+  if (typeof pixel !== "number") {
+    const sourceImageData = imageDataFromPayload(source)
+    const targetImageData = imageDataFromPayload(target)
+    pixel = pixelSimilarity(sourceImageData, targetImageData)
+    setCachedValue(pixelCache, sourceTargetPairKey, pixel, PIXEL_CACHE_LIMIT)
+  }
+  const pixelSimilarityScore = typeof pixel === "number" ? pixel : 0
 
-      pixel = pixelSimilarity(sourceImageData, targetImageData)
-      setCachedValue(pixelCache, sourceTargetPairKey, pixel, PIXEL_CACHE_LIMIT)
-    }
-    const pixelSimilarityScore = typeof pixel === "number" ? pixel : 0
+  const pixelTimingMs = elapsedMs(pixelStarted)
+  const embeddingStarted = nowMs()
+  const cacheCounter = { embeddingHits: 0, embeddingMisses: 0 }
 
-    const pixelTimingMs = elapsedMs(pixelStarted)
-    const embeddingStarted = nowMs()
-    const cacheCounter = { embeddingHits: 0, embeddingMisses: 0 }
-
-    const perModelSettled = await Promise.allSettled(
-      ids.map((modelId) =>
-        compareWithModel(
-          modelId,
-          sourceImageKey,
-          targetImageKey,
-          getSourceRawImage,
-          getTargetRawImage,
-          pixelSimilarityScore,
-          normalizedWeights,
-          cacheCounter
-        )
+  const perModelSettled = await Promise.allSettled(
+    ids.map((modelId) =>
+      compareWithModel(
+        modelId,
+        sourceImageKey,
+        targetImageKey,
+        getSourceRawImage,
+        getTargetRawImage,
+        pixelSimilarityScore,
+        normalizedWeights,
+        cacheCounter
       )
     )
+  )
 
-    const perModelScores: PerModelScore[] = []
-    const errors: string[] = []
+  const perModelScores: PerModelScore[] = []
+  const errors: string[] = []
 
-    for (let index = 0; index < perModelSettled.length; index += 1) {
-      const settled = perModelSettled[index]
-      const modelId = ids[index]
+  for (let index = 0; index < perModelSettled.length; index += 1) {
+    const settled = perModelSettled[index]
+    const modelId = ids[index]
 
-      if (settled.status === "fulfilled") {
-        perModelScores.push(settled.value)
-        continue
-      }
-
-      const reason =
-        settled.reason instanceof Error
-          ? settled.reason.message
-          : "Model compare failed"
-
-      errors.push(`${modelId}: ${reason}`)
+    if (settled.status === "fulfilled") {
+      perModelScores.push(settled.value)
+      continue
     }
 
-    if (!perModelScores.length) {
-      throw new Error(`All selected models failed. ${errors.join(" | ")}`)
-    }
+    const reason =
+      settled.reason instanceof Error
+        ? settled.reason.message
+        : "Model compare failed"
 
-    const embeddingSimilarity = Math.min(
-      ...perModelScores.map((item) => item.embeddingSimilarity)
-    )
-    const hybrid = Math.min(...perModelScores.map((item) => item.hybridSimilarity))
+    errors.push(`${modelId}: ${reason}`)
+  }
 
-    return {
-      embeddingSimilarity,
-      pixelSimilarity: pixelSimilarityScore,
-      hybridSimilarity: hybrid,
-      aggregation: "minimum-across-models",
-      usedWeights: normalizedWeights,
-      perModelScores,
-      timingsMs: {
-        total: elapsedMs(totalStarted),
-        pixel: pixelTimingMs,
-        embedding: elapsedMs(embeddingStarted),
-      },
-      cacheStats: {
-        pixelCacheHit,
-        embeddingHits: cacheCounter.embeddingHits,
-        embeddingMisses: cacheCounter.embeddingMisses,
-      },
-    }
-  } finally {
-    if (sourceDecodedPromise) {
-      try {
-        const sourceDecoded = (await sourceDecodedPromise) as {
-          bitmap?: ImageBitmap
-        }
-        sourceDecoded.bitmap?.close()
-      } catch {
-        // no-op
-      }
-    }
+  if (!perModelScores.length) {
+    throw new Error(`All selected models failed. ${errors.join(" | ")}`)
+  }
 
-    if (targetDecodedPromise) {
-      try {
-        const targetDecoded = (await targetDecodedPromise) as {
-          bitmap?: ImageBitmap
-        }
-        targetDecoded.bitmap?.close()
-      } catch {
-        // no-op
-      }
-    }
+  const embeddingSimilarity = Math.min(
+    ...perModelScores.map((item) => item.embeddingSimilarity)
+  )
+  const hybrid = Math.min(...perModelScores.map((item) => item.hybridSimilarity))
+
+  return {
+    embeddingSimilarity,
+    pixelSimilarity: pixelSimilarityScore,
+    hybridSimilarity: hybrid,
+    aggregation: "minimum-across-models",
+    usedWeights: normalizedWeights,
+    perModelScores,
+    timingsMs: {
+      total: elapsedMs(totalStarted),
+      pixel: pixelTimingMs,
+      embedding: elapsedMs(embeddingStarted),
+    },
+    cacheStats: {
+      pixelCacheHit,
+      embeddingHits: cacheCounter.embeddingHits,
+      embeddingMisses: cacheCounter.embeddingMisses,
+    },
   }
 }
 
@@ -470,8 +417,14 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     if (event.data.type === "compare") {
       const payload = event.data.payload
       if (
-        !payload?.sourceDataUrl ||
-        !payload?.targetDataUrl ||
+        !payload?.source ||
+        !payload?.target ||
+        !payload.source.width ||
+        !payload.source.height ||
+        !payload.target.width ||
+        !payload.target.height ||
+        !payload.source.rgba?.length ||
+        !payload.target.rgba?.length ||
         !payload?.modelIds?.length ||
         !payload?.weights
       ) {
@@ -479,8 +432,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       }
 
       const result = await compareRegions(
-        payload.sourceDataUrl,
-        payload.targetDataUrl,
+        payload.source,
+        payload.target,
         payload.modelIds,
         payload.weights
       )

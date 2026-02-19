@@ -1,9 +1,15 @@
 export type NormalizedBBox = { x: number; y: number; width: number; height: number } // 0..1
 export type PixelBBox = { x: number; y: number; width: number; height: number }
 
+export type CompareImagePayload = {
+  width: number
+  height: number
+  rgba: Uint8ClampedArray
+}
+
 export type CompareRequest = {
-  sourceDataUrl: string // cropped ROI PNG data URL
-  targetDataUrl: string // cropped ROI PNG data URL
+  source: CompareImagePayload
+  target: CompareImagePayload
   modelIds: string[]
   weights: CompareWeights
 }
