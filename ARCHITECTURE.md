@@ -210,7 +210,23 @@ Snapshot semantics:
 - Uses threshold/weights/model IDs captured at benchmark run time
 - Enables stable correctness/latency reporting after navigation/refresh
 
-## 9) Extension Guide
+## 9) Model Catalog and Presets
+
+Model catalog lives in `/lib/comparator/model-config.ts`. Each entry has an ID (Hugging Face model path), display label, and notes. The catalog drives the Thorough preset and the model selector UI.
+
+Preset definitions live in `/components/comparator/comparator-types.ts`:
+
+| Preset       | Models                                | Compare Size | Quick Mode |
+| ------------ | ------------------------------------- | ------------ | ---------- |
+| Fast         | DINOv2 Small                          | 160 px       | On         |
+| Balanced     | SigLIP Base Patch16 + DINOv2 Small    | 224 px       | Off        |
+| Thorough     | All catalog models                    | 320 px       | Off        |
+
+Fast uses DINOv2 for its structure-focused matching at lower cost. Balanced pairs it with SigLIP for semantic diversity. Thorough runs every catalog model for maximum coverage.
+
+Default model IDs (used when no preset is active) are configured in `MODEL_CONFIG.defaultModelIds`.
+
+## 10) Extension Guide
 
 Safe extension points:
 - Add new model presets in comparator types/config
@@ -222,7 +238,7 @@ Rules to preserve:
 - Keep session normalization strict (never trust raw persisted data)
 - Preserve non-blocking model init behavior if metadata fails
 
-## 10) Verification Runbook
+## 11) Verification Runbook
 
 Recommended checks after architecture-impacting changes:
 
@@ -235,7 +251,7 @@ Recommended checks after architecture-impacting changes:
    - open `/analytics` and verify chart/table population
    - refresh and confirm restored session/snapshot behavior
 
-## 11) Sequence Diagram
+## 12) Sequence Diagram
 
 ```mermaid
 sequenceDiagram
