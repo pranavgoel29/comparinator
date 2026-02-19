@@ -1,0 +1,4 @@
+export const EMBEDDING_CACHE_LIMIT = 512
+export const PIXEL_CACHE_LIMIT = 512
+export const MAX_COMPARE_SIDE = 2048
+export const HUGGING_FACE_METADATA_TIMEOUT_MS = 5000
