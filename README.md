@@ -36,6 +36,8 @@ Open [http://localhost:3000](http://localhost:3000).
 - Available built-in options include SigLIP Base Patch16, SigLIP2 Base Patch16 (224), DINOv2 Small, CLIP Base Patch32, CLIP Base Patch16, CLIP Large Patch14, and CLIP Large Patch14 (336).
 - You can also add custom model IDs directly in the UI model selector.
 - On first run, model files are downloaded in the browser and then cached by browser storage.
+- Full comparator sessions are auto-saved in browser IndexedDB and restored after refresh (images, boxes, controls, model selection, and benchmark cases).
+- Restored benchmark cases intentionally reset run outputs (`status`, `scores`, `timings`) so you can rerun against the current runtime state.
 - Comparison runs in a dedicated Web Worker to keep the UI responsive.
 - Compare payloads are sent to the worker as raw RGBA typed arrays (not base64 data URLs) to reduce serialization overhead.
 - Runtime comparison cache is in-memory for the current tab/session:
@@ -47,6 +49,7 @@ Open [http://localhost:3000](http://localhost:3000).
   - If pixel weight is `0`, pixel similarity is skipped.
 - Re-running the same benchmark cases is typically faster due to cache hits.
 - Use `Clear runtime cache` in the UI when you want cold-run behavior again.
+- Use `Clear saved session` in the UI to remove persisted IndexedDB session data.
 - Benchmark suite uses an adaptive worker pool (`1..3`) to process cases concurrently.
 
 ## Model notes
@@ -63,4 +66,4 @@ Open [http://localhost:3000](http://localhost:3000).
 - Very large images increase memory use; compare-size control helps cap processing cost.
 - Benchmark pool duplicates model memory per worker by design; use fewer models or lower compare size on lower-memory devices.
 - Changing model set/preset resets benchmark worker caches for correctness.
-- Runtime cache is not persisted across tab refreshes in this version.
+- Runtime compute cache is not persisted across tab refreshes; only session inputs/state are persisted.

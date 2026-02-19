@@ -26,6 +26,13 @@ import {
   MODEL_CONFIG,
   modelLabelFromId,
 } from "@/lib/comparator/model-config"
+import {
+  clearLatestSession,
+  loadLatestSession,
+  saveLatestSession,
+  type PersistedBenchmarkCaseV1,
+  type PersistedSessionV1,
+} from "@/lib/comparator/session-store"
 import { isPass } from "@/lib/comparator/metrics"
 import type {
   CompareRequest,
@@ -37,6 +44,7 @@ import type {
 
 const DEFAULT_THRESHOLD = 0.85
 const DEFAULT_MAX_COMPARE_SIDE = 224
+const SESSION_SAVE_DEBOUNCE_MS = 400
 
 type ModelStatus = "idle" | "loading" | "ready" | "error"
 type BenchmarkCaseStatus = "idle" | "running" | "done" | "error"
@@ -55,6 +63,63 @@ type BenchmarkCase = {
   result: CompareResult | null
   error: string | null
   durationMs: number | null
+}
+
+function isBenchmarkPreset(value: unknown): value is BenchmarkPreset {
+  return (
+    value === "fast" ||
+    value === "balanced" ||
+    value === "thorough" ||
+    value === "custom"
+  )
+}
+
+function toRuntimeBenchmarkCase(
+  persisted: PersistedBenchmarkCaseV1
+): BenchmarkCase {
+  return {
+    id: persisted.id,
+    label: persisted.label,
+    sourceName: persisted.sourceName,
+    targetName: persisted.targetName,
+    sourceDataUrl: persisted.sourceDataUrl,
+    targetDataUrl: persisted.targetDataUrl,
+    sourcePayload: {
+      width: persisted.sourcePayload.width,
+      height: persisted.sourcePayload.height,
+      rgba: new Uint8ClampedArray(persisted.sourcePayload.rgba),
+    },
+    targetPayload: {
+      width: persisted.targetPayload.width,
+      height: persisted.targetPayload.height,
+      rgba: new Uint8ClampedArray(persisted.targetPayload.rgba),
+    },
+    status: "idle",
+    result: null,
+    error: null,
+    durationMs: null,
+  }
+}
+
+function toPersistedBenchmarkCase(caseItem: BenchmarkCase): PersistedBenchmarkCaseV1 {
+  return {
+    id: caseItem.id,
+    label: caseItem.label,
+    sourceName: caseItem.sourceName,
+    targetName: caseItem.targetName,
+    sourceDataUrl: caseItem.sourceDataUrl,
+    targetDataUrl: caseItem.targetDataUrl,
+    sourcePayload: {
+      width: caseItem.sourcePayload.width,
+      height: caseItem.sourcePayload.height,
+      rgba: new Uint8ClampedArray(caseItem.sourcePayload.rgba),
+    },
+    targetPayload: {
+      width: caseItem.targetPayload.width,
+      height: caseItem.targetPayload.height,
+      rgba: new Uint8ClampedArray(caseItem.targetPayload.rgba),
+    },
+  }
 }
 
 function statusChipClass(status: ModelStatus) {
@@ -157,6 +222,8 @@ function createComparatorWorker() {
 export function ComparatorApp() {
   const [sourceBitmap, setSourceBitmap] = React.useState<ImageBitmap | null>(null)
   const [targetBitmap, setTargetBitmap] = React.useState<ImageBitmap | null>(null)
+  const [sourceImageBlob, setSourceImageBlob] = React.useState<Blob | null>(null)
+  const [targetImageBlob, setTargetImageBlob] = React.useState<Blob | null>(null)
   const [sourceFileName, setSourceFileName] = React.useState<string>()
   const [targetFileName, setTargetFileName] = React.useState<string>()
   const [sourceBBox, setSourceBBox] = React.useState<NormalizedBBox | null>(null)
@@ -203,6 +270,8 @@ export function ComparatorApp() {
 
   const [benchmarkCases, setBenchmarkCases] = React.useState<BenchmarkCase[]>([])
   const [isRunningBenchmark, setIsRunningBenchmark] = React.useState(false)
+  const [isSessionHydrated, setIsSessionHydrated] = React.useState(false)
+  const [workerMounted, setWorkerMounted] = React.useState(false)
 
   const workerRef = React.useRef<Worker | null>(null)
   const sourceBitmapRef = React.useRef<ImageBitmap | null>(null)
@@ -212,6 +281,8 @@ export function ComparatorApp() {
     reject: (error: Error) => void
   } | null>(null)
   const applyingPresetRef = React.useRef(false)
+  const initializedAfterHydrationRef = React.useRef(false)
+  const saveErrorShownRef = React.useRef(false)
   const benchmarkRunIdRef = React.useRef(0)
   const benchmarkAbortRef = React.useRef<AbortController | null>(null)
   const benchmarkPoolRef = React.useRef<BenchmarkPoolHandle | null>(null)
@@ -390,6 +461,7 @@ export function ComparatorApp() {
     const worker = createComparatorWorker()
 
     workerRef.current = worker
+    setWorkerMounted(true)
 
     worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       const message = event.data
@@ -450,8 +522,6 @@ export function ComparatorApp() {
       setIsComparing(false)
     }
 
-    initWorkerModels([...MODEL_CONFIG.defaultModelIds])
-
     return () => {
       if (pendingCompareRef.current) {
         pendingCompareRef.current.reject(new Error("Worker terminated."))
@@ -460,8 +530,9 @@ export function ComparatorApp() {
 
       worker.terminate()
       workerRef.current = null
+      setWorkerMounted(false)
     }
-  }, [initWorkerModels])
+  }, [])
 
   React.useEffect(() => {
     sourceBitmapRef.current = sourceBitmap
@@ -487,6 +558,253 @@ export function ComparatorApp() {
     }
   }, [])
 
+  React.useEffect(() => {
+    let cancelled = false
+
+    const hydrateSession = async () => {
+      if (typeof indexedDB === "undefined") {
+        if (!cancelled) {
+          setRuntimeInfo("Session persistence is unavailable in this browser.")
+          setIsSessionHydrated(true)
+        }
+        return
+      }
+
+      try {
+        const session = await loadLatestSession()
+        if (cancelled || !session) {
+          return
+        }
+
+        const restoreImage = async (
+          entry: PersistedSessionV1["source"],
+          kind: "source" | "target"
+        ) => {
+          if (!entry) {
+            if (kind === "source") {
+              setSourceBitmap((previous) => {
+                previous?.close()
+                return null
+              })
+              setSourceImageBlob(null)
+              setSourceFileName(undefined)
+              setSourceBBox(null)
+              setSourceLockAreaOnUpload(false)
+            } else {
+              setTargetBitmap((previous) => {
+                previous?.close()
+                return null
+              })
+              setTargetImageBlob(null)
+              setTargetFileName(undefined)
+              setTargetBBox(null)
+              setTargetLockAreaOnUpload(false)
+            }
+            return
+          }
+
+          const bitmap = await createImageBitmap(entry.imageBlob)
+          if (cancelled) {
+            bitmap.close()
+            return
+          }
+
+          if (kind === "source") {
+            setSourceBitmap((previous) => {
+              previous?.close()
+              return bitmap
+            })
+            setSourceImageBlob(entry.imageBlob)
+            setSourceFileName(entry.fileName)
+            setSourceBBox(entry.bbox ?? createDefaultBBox())
+            setSourceLockAreaOnUpload(entry.lockOnUpload)
+            return
+          }
+
+          setTargetBitmap((previous) => {
+            previous?.close()
+            return bitmap
+          })
+          setTargetImageBlob(entry.imageBlob)
+          setTargetFileName(entry.fileName)
+          setTargetBBox(entry.bbox ?? createDefaultBBox())
+          setTargetLockAreaOnUpload(entry.lockOnUpload)
+        }
+
+        await restoreImage(session.source, "source")
+        await restoreImage(session.target, "target")
+        if (cancelled) {
+          return
+        }
+
+        setThreshold(session.controls.threshold)
+        setEmbeddingWeight(session.controls.embeddingWeight)
+        setMinAreaPixels(session.controls.minAreaPixels)
+        setMaxCompareSide(session.controls.maxCompareSide)
+        setQuickMode(session.controls.quickMode)
+        setSelectedPreset(
+          isBenchmarkPreset(session.controls.selectedPreset)
+            ? session.controls.selectedPreset
+            : "custom"
+        )
+        setLastNonCustomPreset(session.controls.lastNonCustomPreset)
+        setSelectedModelIds(
+          session.controls.selectedModelIds.length
+            ? unique(session.controls.selectedModelIds)
+            : [...MODEL_CONFIG.defaultModelIds]
+        )
+
+        const restoredCases = session.benchmark.cases.map((item) =>
+          toRuntimeBenchmarkCase(item)
+        )
+        setBenchmarkCases(restoredCases)
+
+        const selectedId =
+          session.benchmark.selectedBenchmarkCaseId &&
+          restoredCases.some((item) => item.id === session.benchmark.selectedBenchmarkCaseId)
+            ? session.benchmark.selectedBenchmarkCaseId
+            : null
+        setSelectedBenchmarkCaseId(selectedId)
+        setResult(null)
+        setSourceCropUrl(null)
+        setTargetCropUrl(null)
+        setRuntimeInfo("Restored previous session.")
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
+
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Could not restore previous session."
+        setRuntimeInfo(`Session restore skipped: ${message}`)
+      } finally {
+        if (!cancelled) {
+          setIsSessionHydrated(true)
+        }
+      }
+    }
+
+    hydrateSession()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (!isSessionHydrated || !workerMounted || initializedAfterHydrationRef.current) {
+      return
+    }
+
+    initializedAfterHydrationRef.current = true
+    initWorkerModels(selectedModelIds.length ? selectedModelIds : [...MODEL_CONFIG.defaultModelIds])
+  }, [initWorkerModels, isSessionHydrated, selectedModelIds, workerMounted])
+
+  React.useEffect(() => {
+    if (!isSessionHydrated || isRunningBenchmark) {
+      return
+    }
+
+    const timer = window.setTimeout(async () => {
+      const sourceSelection =
+        sourceImageBlob && sourceFileName
+          ? {
+              fileName: sourceFileName,
+              imageBlob: sourceImageBlob,
+              bbox: sourceBBox,
+              lockOnUpload: sourceLockAreaOnUpload,
+            }
+          : null
+
+      const targetSelection =
+        targetImageBlob && targetFileName
+          ? {
+              fileName: targetFileName,
+              imageBlob: targetImageBlob,
+              bbox: targetBBox,
+              lockOnUpload: targetLockAreaOnUpload,
+            }
+          : null
+
+      const persistedCases = benchmarkCases.map((item) =>
+        toPersistedBenchmarkCase(item)
+      )
+      const selectedId =
+        selectedBenchmarkCaseId &&
+        persistedCases.some((item) => item.id === selectedBenchmarkCaseId)
+          ? selectedBenchmarkCaseId
+          : null
+      const nextModelIds = selectedModelIds.length
+        ? unique(selectedModelIds)
+        : [...MODEL_CONFIG.defaultModelIds]
+
+      const payload: PersistedSessionV1 = {
+        version: 1,
+        savedAt: Date.now(),
+        source: sourceSelection,
+        target: targetSelection,
+        controls: {
+          threshold,
+          embeddingWeight,
+          minAreaPixels,
+          maxCompareSide,
+          quickMode,
+          selectedPreset: selectedPreset,
+          lastNonCustomPreset,
+          selectedModelIds: nextModelIds,
+        },
+        benchmark: {
+          cases: persistedCases,
+          selectedBenchmarkCaseId: selectedId,
+        },
+      }
+
+      try {
+        await saveLatestSession(payload)
+        if (saveErrorShownRef.current) {
+          setModelError((previous) =>
+            previous?.includes("Could not persist session") ? null : previous
+          )
+          saveErrorShownRef.current = false
+        }
+      } catch {
+        if (!saveErrorShownRef.current) {
+          setModelError(
+            "Could not persist session (storage quota exceeded or browser storage unavailable)."
+          )
+          saveErrorShownRef.current = true
+        }
+      }
+    }, SESSION_SAVE_DEBOUNCE_MS)
+
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [
+    benchmarkCases,
+    embeddingWeight,
+    isRunningBenchmark,
+    isSessionHydrated,
+    lastNonCustomPreset,
+    maxCompareSide,
+    minAreaPixels,
+    quickMode,
+    selectedBenchmarkCaseId,
+    selectedModelIds,
+    selectedPreset,
+    sourceBBox,
+    sourceFileName,
+    sourceImageBlob,
+    sourceLockAreaOnUpload,
+    targetBBox,
+    targetFileName,
+    targetImageBlob,
+    targetLockAreaOnUpload,
+    threshold,
+  ])
+
   const sourceDimensions = sourceBitmap
     ? { width: sourceBitmap.width, height: sourceBitmap.height }
     : null
@@ -504,6 +822,7 @@ export function ComparatorApp() {
             previous?.close()
             return bitmap
           })
+          setSourceImageBlob(file)
           setSourceFileName(file.name)
           setSourceBBox((previous) => {
             if (sourceLockAreaOnUpload && previous) {
@@ -516,6 +835,7 @@ export function ComparatorApp() {
             previous?.close()
             return bitmap
           })
+          setTargetImageBlob(file)
           setTargetFileName(file.name)
           setTargetBBox((previous) => {
             if (targetLockAreaOnUpload && previous) {
@@ -724,6 +1044,19 @@ export function ComparatorApp() {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to clear benchmark cache."
+      setModelError(message)
+    }
+  }, [])
+
+  const clearSavedSession = React.useCallback(async () => {
+    try {
+      await clearLatestSession()
+      setRuntimeInfo("Saved session cleared from browser storage.")
+      setModelError(null)
+      saveErrorShownRef.current = false
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to clear saved session."
       setModelError(message)
     }
   }, [])
@@ -1001,13 +1334,23 @@ export function ComparatorApp() {
               </p>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="outline">Source: {readinessLabel(Boolean(sourceBitmap))}</Badge>
-              <Badge variant="outline">Target: {readinessLabel(Boolean(targetBitmap))}</Badge>
-              <Badge variant="outline">
-                Active models: {activeModelIds.length}
-              </Badge>
-              <Badge className={statusChipClass(modelStatus)}>Engine: {modelStatus}</Badge>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap gap-2">
+                <Badge variant="outline">Source: {readinessLabel(Boolean(sourceBitmap))}</Badge>
+                <Badge variant="outline">Target: {readinessLabel(Boolean(targetBitmap))}</Badge>
+                <Badge variant="outline">
+                  Active models: {activeModelIds.length}
+                </Badge>
+                <Badge className={statusChipClass(modelStatus)}>Engine: {modelStatus}</Badge>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={clearSavedSession}
+                disabled={isComparing || isRunningBenchmark}
+              >
+                Clear saved session
+              </Button>
             </div>
           </CardHeader>
         </Card>
