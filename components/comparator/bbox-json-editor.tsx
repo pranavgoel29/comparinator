@@ -59,28 +59,32 @@ export function BBoxJsonEditor({
   }, [dimensions, onApply, value])
 
   return (
-    <div className="space-y-2 rounded-md border border-zinc-800 bg-zinc-950/55 p-3">
-      <p className="text-xs font-medium uppercase tracking-wide text-zinc-400">
-        {title} JSON
-      </p>
+    <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+          {title} Box JSON
+        </p>
+        <p className="text-[11px] text-muted-foreground">left/top/right/bottom</p>
+      </div>
+
       <Textarea
         value={value}
         onChange={(event) => setValue(event.target.value)}
         placeholder={`{\n  "minX": 958,\n  "minY": 1151,\n  "maxX": 1133,\n  "maxY": 1255\n}`}
-        className="min-h-32 border-zinc-700 bg-zinc-900 font-mono text-xs text-zinc-100 placeholder:text-zinc-500"
+        className="min-h-32 border-border bg-background font-mono text-xs text-foreground placeholder:text-muted-foreground"
       />
+
       <div className="flex flex-wrap gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          className="border-zinc-700 bg-zinc-900 text-zinc-100 hover:bg-zinc-800"
-          onClick={applyJson}
-        >
+        <Button type="button" variant="outline" onClick={applyJson}>
           Apply JSON
         </Button>
       </div>
 
-      {error ? <p className="text-xs text-rose-300">{error}</p> : null}
+      {error ? (
+        <p className="rounded-md border border-destructive/35 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
     </div>
   )
 }

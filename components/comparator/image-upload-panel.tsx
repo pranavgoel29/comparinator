@@ -8,6 +8,7 @@ import { ACCEPTED_IMAGE_MIME_TYPES } from "@/lib/comparator/image"
 
 type ImageUploadPanelProps = {
   title: string
+  subtitle?: string
   fileName?: string
   dimensions?: { width: number; height: number } | null
   onSelect: (file: File) => void
@@ -16,6 +17,7 @@ type ImageUploadPanelProps = {
 
 export function ImageUploadPanel({
   title,
+  subtitle,
   fileName,
   dimensions,
   onSelect,
@@ -24,11 +26,10 @@ export function ImageUploadPanel({
   const inputRef = React.useRef<HTMLInputElement | null>(null)
 
   return (
-    <Card className="border-zinc-800/80 bg-zinc-950/70 text-zinc-100 shadow-[0_10px_35px_rgba(0,0,0,0.45)]">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-sm font-semibold tracking-wide text-zinc-100">
-          {title}
-        </CardTitle>
+    <Card className="border-border bg-card/90 shadow-sm">
+      <CardHeader className="space-y-1 pb-3">
+        <CardTitle className="text-sm font-semibold tracking-wide">{title}</CardTitle>
+        {subtitle ? <p className="text-xs text-muted-foreground">{subtitle}</p> : null}
       </CardHeader>
       <CardContent className="space-y-3">
         <input
@@ -48,25 +49,31 @@ export function ImageUploadPanel({
         />
 
         <Button
+          type="button"
           variant="outline"
-          className="w-full border-zinc-700 bg-zinc-900 text-zinc-100 hover:bg-zinc-800"
           onClick={() => inputRef.current?.click()}
+          className="group h-auto w-full justify-between rounded-lg border-dashed bg-muted/40 px-3 py-3 text-left transition hover:border-primary/60 hover:bg-muted"
         >
-          Upload image
+          <span className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
+            Upload image
+          </span>
+          <span className="rounded-md border border-border bg-background px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-foreground transition group-hover:border-primary/40 group-hover:text-primary">
+            Browse
+          </span>
         </Button>
 
-        <div className="min-h-12 rounded-md border border-zinc-800 bg-zinc-950/50 p-2 text-xs text-zinc-300">
+        <div className="min-h-12 rounded-md border border-border bg-muted/30 p-2 text-xs text-muted-foreground">
           {fileName ? (
             <div className="space-y-1">
-              <p className="truncate font-medium text-zinc-100">{fileName}</p>
+              <p className="truncate font-medium text-foreground">{fileName}</p>
               {dimensions ? (
-                <p className="text-zinc-400">
+                <p>
                   {dimensions.width} x {dimensions.height}
                 </p>
               ) : null}
             </div>
           ) : (
-            <p className="text-zinc-500">PNG, JPEG, WEBP</p>
+            <p>Accepted: PNG, JPEG, WEBP</p>
           )}
         </div>
 

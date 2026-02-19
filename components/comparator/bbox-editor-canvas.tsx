@@ -19,13 +19,13 @@ type BBoxEditorCanvasProps = {
   label: string
   editable?: boolean
   onChange?: (bbox: NormalizedBBox) => void
+  minPixels?: number
 }
 
 type ResizeHandle = "nw" | "ne" | "sw" | "se"
 type DragMode = "draw" | "move" | `resize-${ResizeHandle}`
 
 const HANDLE_RADIUS = 7
-const MIN_PIXELS = 8
 
 function isInsideBox(point: { x: number; y: number }, box: PixelBBox) {
   return (
@@ -66,8 +66,8 @@ function drawHandles(ctx: CanvasRenderingContext2D, box: PixelBBox) {
   ]
 
   ctx.save()
-  ctx.fillStyle = "#0f172a"
-  ctx.strokeStyle = "#22d3ee"
+  ctx.fillStyle = "#0a0f1f"
+  ctx.strokeStyle = "#67e8f9"
   ctx.lineWidth = 1.5
 
   for (const point of points) {
@@ -86,6 +86,7 @@ export function BBoxEditorCanvas({
   label,
   editable = false,
   onChange,
+  minPixels = 24,
 }: BBoxEditorCanvasProps) {
   const containerRef = React.useRef<HTMLDivElement | null>(null)
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
@@ -157,7 +158,16 @@ export function BBoxEditorCanvas({
       return
     }
 
-    context.drawImage(image, 0, 0, canvas.width, canvas.height)
+    try {
+      context.drawImage(image, 0, 0, canvas.width, canvas.height)
+    } catch {
+      context.fillStyle = "#020617"
+      context.fillRect(0, 0, canvas.width, canvas.height)
+      context.fillStyle = "#fca5a5"
+      context.font = "600 13px ui-sans-serif"
+      context.fillText("Image rendering unavailable", 16, 28)
+      return
+    }
 
     if (!bbox) {
       return
@@ -169,16 +179,24 @@ export function BBoxEditorCanvas({
     })
 
     context.save()
-    context.fillStyle = "rgba(2, 6, 23, 0.55)"
-    context.fillRect(0, 0, canvas.width, canvas.height)
-    context.clearRect(box.x, box.y, box.width, box.height)
-    context.restore()
-
-    context.save()
-    context.strokeStyle = editable ? "#22d3ee" : "#f97316"
+    context.strokeStyle = editable ? "#67e8f9" : "#fdba74"
     context.lineWidth = 2
     context.setLineDash([10, 6])
     context.strokeRect(box.x, box.y, box.width, box.height)
+    context.setLineDash([])
+
+    context.strokeStyle = "rgba(148, 163, 184, 0.35)"
+    context.lineWidth = 1
+    context.beginPath()
+    context.moveTo(box.x + box.width / 2, box.y)
+    context.lineTo(box.x + box.width / 2, box.y + box.height)
+    context.moveTo(box.x, box.y + box.height / 2)
+    context.lineTo(box.x + box.width, box.y + box.height / 2)
+    context.stroke()
+    context.fillStyle = editable
+      ? "rgba(103, 232, 249, 0.08)"
+      : "rgba(253, 186, 116, 0.08)"
+    context.fillRect(box.x, box.y, box.width, box.height)
     context.restore()
 
     if (editable) {
@@ -186,7 +204,7 @@ export function BBoxEditorCanvas({
     }
 
     context.save()
-    context.fillStyle = "rgba(2, 6, 23, 0.72)"
+    context.fillStyle = "rgba(2, 6, 23, 0.74)"
     context.fillRect(10, 10, 220, 30)
     context.fillStyle = "#e2e8f0"
     context.font = "600 12px ui-sans-serif"
@@ -200,8 +218,8 @@ export function BBoxEditorCanvas({
         return
       }
 
-      const minWidth = (MIN_PIXELS / image.width) * viewport.width
-      const minHeight = (MIN_PIXELS / image.height) * viewport.height
+      const minWidth = (minPixels / image.width) * viewport.width
+      const minHeight = (minPixels / image.height) * viewport.height
 
       const clamped = clampPixelBBox(
         nextBox,
@@ -219,20 +237,25 @@ export function BBoxEditorCanvas({
       const constrained = enforceMinimumBoxSize(normalized, {
         width: image.width,
         height: image.height,
-      })
+      }, minPixels)
 
       onChange(roundNormalizedBBox(constrained))
     },
-    [image, onChange, viewport.height, viewport.width]
+    [image, minPixels, onChange, viewport.height, viewport.width]
   )
 
-  const getPointer = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect()
-    const x = ((event.clientX - rect.left) / rect.width) * event.currentTarget.width
-    const y = ((event.clientY - rect.top) / rect.height) * event.currentTarget.height
+  const getPointer = React.useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      const rect = event.currentTarget.getBoundingClientRect()
+      const x =
+        ((event.clientX - rect.left) / rect.width) * event.currentTarget.width
+      const y =
+        ((event.clientY - rect.top) / rect.height) * event.currentTarget.height
 
-    return { x, y }
-  }, [])
+      return { x, y }
+    },
+    []
+  )
 
   const onPointerDown = React.useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -357,11 +380,11 @@ export function BBoxEditorCanvas({
   return (
     <div
       ref={containerRef}
-      className="relative rounded-xl border border-zinc-800 bg-zinc-950/50 p-3"
+      className="relative overflow-hidden rounded-xl border border-border bg-muted/20 p-3"
     >
       <canvas
         ref={canvasRef}
-        className="w-full rounded-md border border-zinc-800 bg-zinc-950 touch-none"
+        className="relative w-full rounded-md border border-border bg-background touch-none"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}

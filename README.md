@@ -9,9 +9,10 @@ A browser-local Next.js app for comparing source and target ROIs across two imag
 - Optionally edit either ROI via JSON using:
   - `minX`, `minY`, `maxX`, `maxY`
 - Compare those two crops using:
-  - CLIP-style embedding similarity (`@huggingface/transformers` in a Web Worker)
+  - Multi-model CLIP embedding similarity (`@huggingface/transformers` in a Web Worker)
   - Pixel similarity (normalized MAE)
-- Produce a hybrid score: `0.8 * embedding + 0.2 * pixel`
+- Produce a conservative ensemble score (minimum across selected models)
+- Tune semantic-vs-pixel weighting in the UI to fit your data
 - Evaluate pass/fail using a threshold (default `0.85`)
 
 ## Run locally
@@ -26,6 +27,8 @@ Open [http://localhost:3000](http://localhost:3000).
 ## Model/caching notes
 
 - The model is loaded client-side via `@huggingface/transformers`.
+- You can select multiple models in the UI and compare with a conservative ensemble.
+- Available model options now include CLIP Base Patch32, CLIP Base Patch16, CLIP Large Patch14, and SigLIP Base Patch16.
 - On first run, model files are downloaded in the browser and then cached by browser storage.
 - Comparison runs in a dedicated Web Worker to keep the UI responsive.
 
