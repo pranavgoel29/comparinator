@@ -69,6 +69,49 @@ export function cropImageRegion(
   }
 }
 
+export function resizeCroppedRegion(
+  region: CroppedRegion,
+  maxSide: number
+): CroppedRegion {
+  const sideLimit = Math.max(16, Math.round(maxSide))
+  const largestSide = Math.max(region.width, region.height)
+  if (largestSide <= sideLimit) {
+    return region
+  }
+
+  const scale = sideLimit / largestSide
+  const nextWidth = Math.max(1, Math.round(region.width * scale))
+  const nextHeight = Math.max(1, Math.round(region.height * scale))
+
+  const sourceCanvas = document.createElement("canvas")
+  sourceCanvas.width = region.width
+  sourceCanvas.height = region.height
+  const sourceCtx = sourceCanvas.getContext("2d")
+  if (!sourceCtx) {
+    throw new Error("Could not initialize source resize canvas context.")
+  }
+  sourceCtx.putImageData(region.imageData, 0, 0)
+
+  const targetCanvas = document.createElement("canvas")
+  targetCanvas.width = nextWidth
+  targetCanvas.height = nextHeight
+  const targetCtx = targetCanvas.getContext("2d")
+  if (!targetCtx) {
+    throw new Error("Could not initialize target resize canvas context.")
+  }
+
+  targetCtx.imageSmoothingEnabled = true
+  targetCtx.imageSmoothingQuality = "high"
+  targetCtx.drawImage(sourceCanvas, 0, 0, nextWidth, nextHeight)
+
+  return {
+    dataUrl: targetCanvas.toDataURL("image/png"),
+    imageData: targetCtx.getImageData(0, 0, nextWidth, nextHeight),
+    width: nextWidth,
+    height: nextHeight,
+  }
+}
+
 export function calculateViewportSize(
   image: { width: number; height: number },
   containerWidth: number,

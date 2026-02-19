@@ -1,18 +1,20 @@
-# Comparinator ROI
+# Comparinator Playground
 
-A browser-local Next.js app for comparing source and target ROIs across two images.
+A browser-local Next.js app for comparing selected areas across images and benchmarking many pairs.
 
 ## What it does
 
 - Upload a **source** and **target** image (`png`, `jpeg`, `webp`)
-- Draw/resize ROI independently on source and target images
-- Optionally edit either ROI via JSON using:
+- Draw/resize a selected area independently on source and target images
+- Optionally edit either area via JSON using:
   - `minX`, `minY`, `maxX`, `maxY`
 - Compare those two crops using:
   - Multi-model CLIP embedding similarity (`@huggingface/transformers` in a Web Worker)
   - Pixel similarity (normalized MAE)
 - Produce a conservative ensemble score (minimum across selected models)
-- Tune semantic-vs-pixel weighting in the UI to fit your data
+- Tune model-vs-pixel weighting in the UI to fit your data
+- Tune speed via compare-size and quick mode controls
+- Save many pairs and run a benchmark suite in one click
 - Evaluate pass/fail using a threshold (default `0.85`)
 
 ## Run locally
@@ -35,5 +37,5 @@ Open [http://localhost:3000](http://localhost:3000).
 ## Known limits
 
 - First compare can take noticeable time while model assets download.
-- Very large images increase memory use; UI preview scales down for rendering while ROI accuracy is preserved.
-- This is a single-pair comparator (no history/batch mode yet).
+- Very large images increase memory use; compare-size control helps cap processing cost.
+- Benchmark suite currently runs sequentially on one worker for stable memory usage.

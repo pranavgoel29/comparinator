@@ -16,6 +16,8 @@ type BBoxJsonEditorProps = {
   bbox: NormalizedBBox | null
   dimensions: { width: number; height: number } | null
   onApply: (bbox: NormalizedBBox) => void
+  lockOnUpload: boolean
+  onLockOnUploadChange: (next: boolean) => void
 }
 
 function prettyPrintBBoxJson(value: MinMaxBBox) {
@@ -27,6 +29,8 @@ export function BBoxJsonEditor({
   bbox,
   dimensions,
   onApply,
+  lockOnUpload,
+  onLockOnUploadChange,
 }: BBoxJsonEditorProps) {
   const [value, setValue] = React.useState("")
   const [error, setError] = React.useState<string | null>(null)
@@ -64,21 +68,47 @@ export function BBoxJsonEditor({
         <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
           {title} Box JSON
         </p>
-        <p className="text-[11px] text-muted-foreground">left/top/right/bottom</p>
+        <div className="flex items-center gap-2">
+          <p className="text-[11px] text-muted-foreground">left/top/right/bottom</p>
+          <Button
+            type="button"
+            variant={lockOnUpload ? "default" : "outline"}
+            size="icon-sm"
+            aria-label={
+              lockOnUpload ? "Unlock JSON input" : "Lock JSON input"
+            }
+            title={lockOnUpload ? "Unlock JSON input" : "Lock JSON input"}
+            onClick={() => onLockOnUploadChange(!lockOnUpload)}
+          >
+            <span aria-hidden>{lockOnUpload ? "🔒" : "🔓"}</span>
+          </Button>
+        </div>
       </div>
 
       <Textarea
         value={value}
         onChange={(event) => setValue(event.target.value)}
+        disabled={lockOnUpload}
         placeholder={`{\n  "minX": 958,\n  "minY": 1151,\n  "maxX": 1133,\n  "maxY": 1255\n}`}
-        className="min-h-32 border-border bg-background font-mono text-xs text-foreground placeholder:text-muted-foreground"
+        className="min-h-32 border-border bg-background font-mono text-xs text-foreground placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-70"
       />
 
       <div className="flex flex-wrap gap-2">
-        <Button type="button" variant="outline" onClick={applyJson}>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={applyJson}
+          disabled={lockOnUpload}
+        >
           Apply JSON
         </Button>
       </div>
+
+      <p className="text-[11px] text-muted-foreground">
+        {lockOnUpload
+          ? "Locked: uploading a new image keeps this area instead of resetting."
+          : "Unlocked: uploading a new image resets area to default."}
+      </p>
 
       {error ? (
         <p className="rounded-md border border-destructive/35 bg-destructive/10 px-2 py-1 text-xs text-destructive">
