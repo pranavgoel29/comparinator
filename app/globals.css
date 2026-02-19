@@ -48,6 +48,8 @@
 }
 
 :root {
+  --font-sans: "Avenir Next", "Segoe UI", "Noto Sans", sans-serif;
+  --font-geist-mono: "JetBrains Mono", "SFMono-Regular", "Menlo", monospace;
   --background: oklch(1 0 0);
   --foreground: oklch(0.147 0.004 49.25);
   --card: oklch(1 0 0);

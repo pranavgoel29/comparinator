@@ -1,5 +1,5 @@
-import { ComponentExample } from "@/components/component-example";
+import { ComparatorApp } from "@/components/comparator/comparator-app"
 
 export default function Page() {
-return <ComponentExample />;
+  return <ComparatorApp />
 }
