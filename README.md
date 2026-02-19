@@ -1,27 +1,18 @@
 # Comparinator Playground
 
-A browser-local Next.js app for comparing selected areas across images and benchmarking many pairs.
+Browser-local image region comparator with model-based + pixel-based scoring, benchmark suites, and analytics.
 
-Detailed architecture is documented in `/ARCHITECTURE.md`.
+## What This Repo Is
 
-## What it does
+Comparinator lets you:
+- compare selected regions between two images
+- combine semantic similarity (Transformers.js vision models) with pixel similarity
+- run benchmark suites across many saved cases
+- track correctness and latency on a dedicated analytics page
 
-- Upload a **source** and **target** image (`png`, `jpeg`, `webp`)
-- Draw/resize a selected area independently on source and target images
-- Optionally edit either area via JSON using:
-  - `minX`, `minY`, `maxX`, `maxY`
-- Compare those two crops using:
-  - Multi-model vision embedding similarity (`@huggingface/transformers` in a Web Worker)
-  - Pixel similarity (normalized MAE)
-- Produce a conservative ensemble score (minimum across selected models)
-- Tune model-vs-pixel weighting in the UI to fit your data
-- Tune speed via compare-size and quick mode controls
-- Use speed presets (`Fast`, `Balanced`, `Thorough`) and still tweak controls manually
-- Save many pairs and run a benchmark suite in one click
-- Select any benchmark case and inspect it in the main Results panel
-- Evaluate pass/fail using a threshold (default `0.85`)
+No server-side inference is required for core compare/benchmark flows.
 
-## Run locally
+## Quick Start
 
 ```bash
 pnpm install
@@ -30,66 +21,74 @@ pnpm dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
-## Architecture (current)
+## Core Features
 
-- UI orchestration and pages:
-  - `/app/page.tsx` (comparator)
-  - `/app/analytics/page.tsx` (analytics)
-- Comparator feature modules:
-  - `/components/comparator/comparator-app.tsx`
-  - `/components/comparator/use-comparator-worker.ts`
-  - `/components/comparator/use-comparator-session.ts`
-  - `/components/comparator/use-benchmark-suite.ts`
-  - `/components/comparator/model-status-dialog.tsx`
-  - `/components/comparator/benchmark-summary-card.tsx`
-  - `/components/comparator/benchmark-cases-list.tsx`
-- Worker entry + feature modules:
+- Dual-image ROI comparison with bbox editor + JSON bbox input
+- Hybrid scoring:
+  - embedding similarity (model-based)
+  - pixel similarity (normalized MAE)
+  - weighted hybrid score
+- Multi-model support with conservative aggregation
+- Speed presets: `Fast`, `Balanced`, `Thorough`
+- Model runtime visibility:
+  - init status phases
+  - download progress
+  - model size (when available)
+- Benchmark suite:
+  - save many cases
+  - run pooled comparisons
+  - per-case correctness (`match` / `non-match` expected outcome)
+- Analytics page (`/analytics`):
+  - correctness + latency charts
+  - incorrect-comparison breakdown
+
+## Project Structure
+
+- Routes:
+  - `/app/page.tsx` comparator
+  - `/app/analytics/page.tsx` analytics
+- Comparator modules:
+  - `/components/comparator/*`
+- Worker modules:
   - `/workers/embedding.worker.ts`
   - `/workers/embedding/*`
-- Session persistence:
-  - `/lib/comparator/session-store.ts` (compat shim)
-  - `/lib/comparator/session-store/*`
+- Persistence and core utilities:
+  - `/lib/comparator/*`
 
-## Model/caching notes
+Detailed architecture docs:
+- `/ARCHITECTURE.md`
 
-- The model is loaded client-side via `@huggingface/transformers`.
-- You can select multiple models in the UI and compare with a conservative ensemble.
-- Defaults now prioritize newer models (SigLIP + SigLIP2) instead of CLIP.
-- Available built-in options include SigLIP Base Patch16, SigLIP2 Base Patch16 (224), DINOv2 Small, CLIP Base Patch32, CLIP Base Patch16, CLIP Large Patch14, and CLIP Large Patch14 (336).
-- You can also add custom model IDs directly in the UI model selector.
-- On first run, model files are downloaded in the browser and then cached by browser storage.
-- Full comparator sessions are auto-saved in browser IndexedDB and restored after refresh (images, boxes, controls, model selection, and benchmark cases).
-- Restored benchmark cases intentionally reset run outputs (`status`, `scores`, `timings`) so you can rerun against the current runtime state.
-- Comparison runs in a dedicated Web Worker to keep the UI responsive.
-- Compare payloads are sent to the worker as raw RGBA typed arrays (not base64 data URLs) to reduce serialization overhead.
-- Runtime comparison cache is in-memory for the current tab/session:
-  - Pixel pair cache
-  - Per-model embedding cache
-- Benchmark workers are reused across runs for the same model setup, so repeated suites can hit cache instead of recomputing.
-- Weight-zero short-circuit is enabled:
-  - If embedding weight is `0`, semantic model inference is skipped.
-  - If pixel weight is `0`, pixel similarity is skipped.
-- Re-running the same benchmark cases is typically faster due to cache hits.
-- Use `Clear runtime cache` in the UI when you want cold-run behavior again.
-- Use `Clear saved session` in the UI to remove persisted IndexedDB session data.
-- Benchmark suite uses an adaptive worker pool (`1..3`) to process cases concurrently.
+## Runtime and Storage
 
-## Model notes
+- Inference runs in Web Workers (UI stays responsive)
+- Runtime caches are in-memory per tab/session
+- Session state is persisted in IndexedDB:
+  - images, bboxes, controls, model selection
+  - benchmark cases
+  - latest benchmark snapshot
+- `Clear runtime cache` clears compute caches
+- `Clear saved session` clears persisted browser session
 
-- SigLIP is a vision-language embedding model trained with a sigmoid matching objective.
-- SigLIP2 is a newer SigLIP-family model and is included in the default balanced setup.
-- `Fast` preset uses SigLIP-only with smaller compare size to reduce latency.
-- `Balanced` preset combines SigLIP and SigLIP2.
-- Final similarity still uses your hybrid weighting between model and pixel scores.
+## Quality Gates
 
-## Known limits
+```bash
+pnpm lint
+pnpm build
+```
 
-- First compare can take noticeable time while model assets download.
-- Very large images increase memory use; compare-size control helps cap processing cost.
-- Benchmark pool duplicates model memory per worker by design; use fewer models or lower compare size on lower-memory devices.
-- Changing model set/preset resets benchmark worker caches for correctness.
-- Runtime compute cache is not persisted across tab refreshes; only session inputs/state are persisted.
+## Security Notes
 
-## Security note
+- Worker payload validation is enforced for compare requests
+- Model ID validation + selection limits are enforced
+- Metadata fetch is timeout-guarded and non-blocking for model init
+- For dependency hygiene in connected environments, run:
 
-- In connected environments, run `pnpm audit --prod` as part of regular dependency hygiene.
+```bash
+pnpm audit --prod
+```
+
+## Known Constraints
+
+- First-time model initialization can be slow due to browser downloads
+- Benchmark pools duplicate model memory per worker
+- Very large images increase memory pressure; reduce compare size as needed
