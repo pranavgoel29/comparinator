@@ -6,24 +6,39 @@ export type ModelCatalogEntry = {
 
 export const MODEL_CATALOG: ModelCatalogEntry[] = [
   {
+    id: "Xenova/siglip-base-patch16-224",
+    label: "SigLIP Base Patch16",
+    notes: "Newer than CLIP; strong default semantic signal at moderate cost.",
+  },
+  {
+    id: "onnx-community/siglip2-base-patch16-224-ONNX",
+    label: "SigLIP2 Base Patch16 (224)",
+    notes: "Next-gen SigLIP2 variant; usually stronger but slower and larger.",
+  },
+  {
+    id: "Xenova/dinov2-small",
+    label: "DINOv2 Small",
+    notes: "Modern self-supervised vision encoder; useful for structure-focused matches.",
+  },
+  {
     id: "Xenova/clip-vit-base-patch32",
     label: "CLIP Base Patch32",
-    notes: "Fast baseline; decent general semantic matching.",
+    notes: "Legacy baseline; very fast but often less discriminative than newer models.",
   },
   {
     id: "Xenova/clip-vit-base-patch16",
     label: "CLIP Base Patch16",
-    notes: "Finer patch granularity; often stricter on local detail.",
+    notes: "Legacy baseline with finer patches; still useful as a fallback check.",
   },
   {
     id: "Xenova/clip-vit-large-patch14",
     label: "CLIP Large Patch14",
-    notes: "Larger CLIP backbone; slower but can be more discriminative.",
+    notes: "Legacy larger CLIP backbone; slower but occasionally useful as a tie-breaker.",
   },
   {
-    id: "Xenova/siglip-base-patch16-224",
-    label: "SigLIP Base Patch16",
-    notes: "Alternative vision-language model; useful as a second opinion.",
+    id: "Xenova/clip-vit-large-patch14-336",
+    label: "CLIP Large Patch14 (336)",
+    notes: "Higher-resolution CLIP variant for fine-detail matching; highest cost.",
   },
 ]
 
@@ -38,8 +53,8 @@ export const MODEL_CONFIG = {
   runtime: "Transformers.js in Web Worker",
   aggregation: "minimum-across-models",
   defaultModelIds: [
-    "Xenova/clip-vit-base-patch32",
-    "Xenova/clip-vit-base-patch16",
+    "Xenova/siglip-base-patch16-224",
+    "onnx-community/siglip2-base-patch16-224-ONNX",
   ],
   minRoiPixels: 24,
   hybridWeights: {

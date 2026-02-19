@@ -115,7 +115,10 @@ function createBenchmarkCaseId() {
 
 const PRESET_MODEL_IDS: Record<Exclude<BenchmarkPreset, "custom">, string[]> = {
   fast: ["Xenova/siglip-base-patch16-224"],
-  balanced: ["Xenova/clip-vit-base-patch32", "Xenova/siglip-base-patch16-224"],
+  balanced: [
+    "Xenova/siglip-base-patch16-224",
+    "onnx-community/siglip2-base-patch16-224-ONNX",
+  ],
   thorough: MODEL_CATALOG.map((model) => model.id),
 }
 
@@ -193,6 +196,8 @@ export function ComparatorApp() {
   const [selectedModelIds, setSelectedModelIds] = React.useState<string[]>(
     [...MODEL_CONFIG.defaultModelIds]
   )
+  const [customModelId, setCustomModelId] = React.useState("")
+  const [customModelError, setCustomModelError] = React.useState<string | null>(null)
   const [loadedModelIds, setLoadedModelIds] = React.useState<string[]>([])
   const [failedModelMessages, setFailedModelMessages] = React.useState<string[]>([])
 
@@ -228,6 +233,20 @@ export function ComparatorApp() {
     }
     setSelectedPreset((previous) => (previous === "custom" ? previous : "custom"))
   }, [])
+
+  const selectableModelEntries = React.useMemo(() => {
+    const catalogIds = new Set(MODEL_CATALOG.map((entry) => entry.id))
+    const customSelectedEntries = selectedModelIds
+      .filter((modelId) => !catalogIds.has(modelId))
+      .map((modelId) => ({
+        id: modelId,
+        label: modelId,
+        notes:
+          "Custom model ID. Must support Transformers.js image-feature-extraction.",
+      }))
+
+    return [...MODEL_CATALOG, ...customSelectedEntries]
+  }, [selectedModelIds])
 
   const selectedBenchmarkCase = React.useMemo(() => {
     if (!selectedBenchmarkCaseId) {
@@ -647,6 +666,35 @@ export function ComparatorApp() {
     },
     [initWorkerModels, markPresetAsCustom, selectedModelIds]
   )
+
+  const addCustomModel = React.useCallback(() => {
+    const modelId = customModelId.trim()
+
+    if (!modelId) {
+      setCustomModelError("Enter a model ID.")
+      return
+    }
+
+    if (!modelId.includes("/")) {
+      setCustomModelError(
+        "Use a repo-style ID, for example Xenova/clip-vit-base-patch32."
+      )
+      return
+    }
+
+    if (selectedModelIds.includes(modelId)) {
+      setCustomModelError("Model is already selected.")
+      return
+    }
+
+    const next = unique([...selectedModelIds, modelId])
+    markPresetAsCustom()
+    setSelectedModelIds(next)
+    setCustomModelId("")
+    setCustomModelError(null)
+    setModelError(null)
+    initWorkerModels(next)
+  }, [customModelId, initWorkerModels, markPresetAsCustom, selectedModelIds])
 
   const handleQuickModeChange = React.useCallback(
     (nextValue: boolean) => {
@@ -1074,10 +1122,10 @@ export function ComparatorApp() {
               </div>
               <div className="rounded-lg border border-border bg-background/80 p-3 text-xs text-muted-foreground">
                 <p>
-                  SigLIP is a vision-language embedding model trained with a sigmoid matching objective. It gives an alternative semantic signal versus CLIP.
+                  This app now defaults to newer vision encoders (SigLIP and SigLIP2). CLIP options remain available as legacy fallbacks.
                 </p>
                 <p className="mt-1">
-                  Fast preset uses SigLIP-only + smaller compare size. Final score still combines model semantics and pixel similarity using your weights.
+                  Fast preset uses SigLIP-only with smaller compare size. Balanced combines SigLIP + SigLIP2. Final score still combines model semantics and pixel similarity using your weights.
                 </p>
               </div>
             </div>
@@ -1212,8 +1260,45 @@ export function ComparatorApp() {
               <p className="text-xs text-muted-foreground">
                 Pick one or more models. To stay conservative, the final model score uses the lowest score among selected models.
               </p>
+              <div className="rounded-lg border border-border bg-background/80 p-3">
+                <p className="text-xs font-medium text-foreground">Add custom model</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Paste any Transformers.js-compatible model ID (e.g. Xenova/clip-vit-base-patch32).
+                </p>
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    type="text"
+                    value={customModelId}
+                    onChange={(event) => {
+                      setCustomModelId(event.currentTarget.value)
+                      if (customModelError) {
+                        setCustomModelError(null)
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault()
+                        addCustomModel()
+                      }
+                    }}
+                    placeholder="Xenova/your-model-id"
+                    className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={addCustomModel}
+                    className="sm:w-auto"
+                  >
+                    Add model
+                  </Button>
+                </div>
+                {customModelError ? (
+                  <p className="mt-2 text-xs text-destructive">{customModelError}</p>
+                ) : null}
+              </div>
               <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                {MODEL_CATALOG.map((entry) => {
+                {selectableModelEntries.map((entry) => {
                   const checked = selectedModelIds.includes(entry.id)
                   const isLoaded = loadedModelIds.includes(entry.id)
                   return (

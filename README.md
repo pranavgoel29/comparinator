@@ -9,7 +9,7 @@ A browser-local Next.js app for comparing selected areas across images and bench
 - Optionally edit either area via JSON using:
   - `minX`, `minY`, `maxX`, `maxY`
 - Compare those two crops using:
-  - Multi-model CLIP embedding similarity (`@huggingface/transformers` in a Web Worker)
+  - Multi-model vision embedding similarity (`@huggingface/transformers` in a Web Worker)
   - Pixel similarity (normalized MAE)
 - Produce a conservative ensemble score (minimum across selected models)
 - Tune model-vs-pixel weighting in the UI to fit your data
@@ -32,7 +32,9 @@ Open [http://localhost:3000](http://localhost:3000).
 
 - The model is loaded client-side via `@huggingface/transformers`.
 - You can select multiple models in the UI and compare with a conservative ensemble.
-- Available model options now include CLIP Base Patch32, CLIP Base Patch16, CLIP Large Patch14, and SigLIP Base Patch16.
+- Defaults now prioritize newer models (SigLIP + SigLIP2) instead of CLIP.
+- Available built-in options include SigLIP Base Patch16, SigLIP2 Base Patch16 (224), DINOv2 Small, CLIP Base Patch32, CLIP Base Patch16, CLIP Large Patch14, and CLIP Large Patch14 (336).
+- You can also add custom model IDs directly in the UI model selector.
 - On first run, model files are downloaded in the browser and then cached by browser storage.
 - Comparison runs in a dedicated Web Worker to keep the UI responsive.
 - Compare payloads are sent to the worker as raw RGBA typed arrays (not base64 data URLs) to reduce serialization overhead.
@@ -47,11 +49,12 @@ Open [http://localhost:3000](http://localhost:3000).
 - Use `Clear runtime cache` in the UI when you want cold-run behavior again.
 - Benchmark suite uses an adaptive worker pool (`1..3`) to process cases concurrently.
 
-## SigLIP notes
+## Model notes
 
 - SigLIP is a vision-language embedding model trained with a sigmoid matching objective.
-- In this app it acts as an alternative semantic similarity signal versus CLIP.
+- SigLIP2 is a newer SigLIP-family model and is included in the default balanced setup.
 - `Fast` preset uses SigLIP-only with smaller compare size to reduce latency.
+- `Balanced` preset combines SigLIP and SigLIP2.
 - Final similarity still uses your hybrid weighting between model and pixel scores.
 
 ## Known limits
