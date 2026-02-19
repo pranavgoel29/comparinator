@@ -651,10 +651,20 @@ export function ComparatorApp() {
         return
       }
       if (message.type === "model-status") {
-        setModelRuntimeStatuses((previous) => ({
-          ...previous,
-          [message.payload.modelId]: message.payload,
-        }))
+        setModelRuntimeStatuses((previous) => {
+          const current = previous[message.payload.modelId]
+          const keepSize =
+            current && typeof current.sizeBytes === "number" && message.payload.sizeBytes === null
+          const keepSource = keepSize ? current.sizeSource : message.payload.sizeSource
+          return {
+            ...previous,
+            [message.payload.modelId]: {
+              ...message.payload,
+              sizeBytes: keepSize ? current.sizeBytes : message.payload.sizeBytes,
+              sizeSource: keepSource,
+            },
+          }
+        })
         return
       }
 
@@ -663,7 +673,15 @@ export function ComparatorApp() {
         setModelRuntimeStatuses((previous) => {
           const next = { ...previous }
           for (const status of message.payload.modelStatuses) {
-            next[status.modelId] = status
+            const current = next[status.modelId]
+            const keepSize =
+              current && typeof current.sizeBytes === "number" && status.sizeBytes === null
+            const keepSource = keepSize ? current.sizeSource : status.sizeSource
+            next[status.modelId] = {
+              ...status,
+              sizeBytes: keepSize ? current.sizeBytes : status.sizeBytes,
+              sizeSource: keepSource,
+            }
           }
           return next
         })
@@ -1648,9 +1666,39 @@ export function ComparatorApp() {
                         Live status from model initialization and metadata fetching.
                       </AlertDialogDescription>
                     </AlertDialogHeader>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      <div className="rounded-md border border-border bg-muted/20 px-2 py-1.5 text-xs">
+                        <p className="text-muted-foreground">Selected</p>
+                        <p className="font-medium text-foreground">{modelStatusRows.length}</p>
+                      </div>
+                      <div className="rounded-md border border-border bg-muted/20 px-2 py-1.5 text-xs">
+                        <p className="text-muted-foreground">Ready</p>
+                        <p className="font-medium text-foreground">
+                          {modelStatusRows.filter((entry) => entry.phase === "ready").length}
+                        </p>
+                      </div>
+                      <div className="rounded-md border border-border bg-muted/20 px-2 py-1.5 text-xs">
+                        <p className="text-muted-foreground">Loading</p>
+                        <p className="font-medium text-foreground">
+                          {
+                            modelStatusRows.filter(
+                              (entry) =>
+                                entry.phase === "metadata-loading" ||
+                                entry.phase === "initializing"
+                            ).length
+                          }
+                        </p>
+                      </div>
+                      <div className="rounded-md border border-border bg-muted/20 px-2 py-1.5 text-xs">
+                        <p className="text-muted-foreground">Errors</p>
+                        <p className="font-medium text-foreground">
+                          {modelStatusRows.filter((entry) => entry.phase === "error").length}
+                        </p>
+                      </div>
+                    </div>
                     <div className="overflow-auto rounded-md border border-border">
                       <table className="min-w-full border-collapse text-xs">
-                        <thead className="bg-muted/40 text-muted-foreground">
+                        <thead className="sticky top-0 z-10 bg-muted/70 text-muted-foreground backdrop-blur-sm">
                           <tr>
                             <th className="px-2 py-2 text-left font-medium">Model</th>
                             <th className="px-2 py-2 text-left font-medium">Status</th>

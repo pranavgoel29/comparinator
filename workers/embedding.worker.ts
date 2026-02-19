@@ -31,6 +31,10 @@ type FeatureExtractor = (
 const extractorPromises = new Map<string, Promise<FeatureExtractor>>()
 const embeddingCache = new Map<string, number[]>()
 const pixelCache = new Map<string, number>()
+const knownModelSizes = new Map<
+  string,
+  { sizeBytes: number; sizeSource: ModelRuntimeStatus["sizeSource"] }
+>()
 const EMBEDDING_CACHE_LIMIT = 512
 const PIXEL_CACHE_LIMIT = 512
 const MAX_COMPARE_SIDE = 2048
@@ -300,8 +304,9 @@ async function initModels(modelIds: string[]) {
       continue
     }
 
-    let sizeBytes: number | null = null
-    let sizeSource: ModelRuntimeStatus["sizeSource"] = "unknown"
+    const knownSize = knownModelSizes.get(modelId)
+    let sizeBytes: number | null = knownSize?.sizeBytes ?? null
+    let sizeSource: ModelRuntimeStatus["sizeSource"] = knownSize?.sizeSource ?? "unknown"
     let metadataError: string | null = null
     let downloadedTotalBytes = 0
 
@@ -337,6 +342,10 @@ async function initModels(modelIds: string[]) {
       loadedModelIds.push(modelId)
       if (!sizeBytes && downloadedTotalBytes > 0) {
         sizeBytes = Math.round(downloadedTotalBytes)
+        sizeSource = "unknown"
+      }
+      if (typeof sizeBytes === "number" && sizeBytes > 0) {
+        knownModelSizes.set(modelId, { sizeBytes, sizeSource })
       }
       const readyStatus = createModelStatus(modelId, "ready", {
         sizeBytes,
