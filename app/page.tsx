@@ -1,4 +1,4 @@
-import { ComparatorApp } from "@/components/comparator/comparator-app"
+import { ComparatorApp } from "@/components/comparator-app"
 
 export default function Page() {
   return <ComparatorApp />
