@@ -19,7 +19,16 @@ type FeatureExtractor = (
   options?: Record<string, unknown>
 ) => Promise<unknown>
 
+type DecodedImage = {
+  bitmap: ImageBitmap
+  rawImage: RawImage
+}
+
 const extractorPromises = new Map<string, Promise<FeatureExtractor>>()
+const embeddingCache = new Map<string, number[]>()
+const pixelCache = new Map<string, number>()
+const EMBEDDING_CACHE_LIMIT = 512
+const PIXEL_CACHE_LIMIT = 512
 
 const createPipeline = pipeline as unknown as (
   task: string,
@@ -35,6 +44,55 @@ function uniqueModelIds(modelIds: string[]) {
   return Array.from(
     new Set(modelIds.map((value) => value.trim()).filter(Boolean))
   )
+}
+
+function nowMs() {
+  return performance.now()
+}
+
+function elapsedMs(started: number) {
+  return Math.max(0, Math.round(nowMs() - started))
+}
+
+function hashString(value: string) {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+function getCachedValue<T>(cache: Map<string, T>, key: string) {
+  const value = cache.get(key)
+  if (value === undefined) {
+    return undefined
+  }
+
+  cache.delete(key)
+  cache.set(key, value)
+  return value
+}
+
+function setCachedValue<T>(
+  cache: Map<string, T>,
+  key: string,
+  value: T,
+  limit: number
+) {
+  if (cache.has(key)) {
+    cache.delete(key)
+  }
+  cache.set(key, value)
+
+  while (cache.size > limit) {
+    const oldestKey = cache.keys().next().value
+    if (typeof oldestKey === "string") {
+      cache.delete(oldestKey)
+      continue
+    }
+    break
+  }
 }
 
 function normalizeWeights(input: CompareWeights): CompareWeights {
@@ -109,7 +167,7 @@ async function initModels(modelIds: string[]) {
   return { loadedModelIds, failedModels }
 }
 
-async function decodeDataUrl(dataUrl: string) {
+async function decodeDataUrl(dataUrl: string): Promise<DecodedImage> {
   const response = await fetch(dataUrl)
   if (!response.ok) {
     throw new Error("Could not decode image data URL.")
@@ -176,26 +234,73 @@ function toVector(output: unknown): number[] {
 
 async function compareWithModel(
   modelId: string,
-  sourceRawImage: RawImage,
-  targetRawImage: RawImage,
+  sourceImageKey: string,
+  targetImageKey: string,
+  getSourceRawImage: () => Promise<RawImage>,
+  getTargetRawImage: () => Promise<RawImage>,
   pixel: number,
-  weights: CompareWeights
+  weights: CompareWeights,
+  cacheCounter: { embeddingHits: number; embeddingMisses: number }
 ): Promise<PerModelScore> {
-  const extractor = await getExtractor(modelId)
+  const started = nowMs()
+  const sourceCacheKey = `${modelId}|${sourceImageKey}`
+  const targetCacheKey = `${modelId}|${targetImageKey}`
 
-  const [sourceFeatures, targetFeatures] = await Promise.all([
-    extractor(sourceRawImage, { pooling: "mean", normalize: true }),
-    extractor(targetRawImage, { pooling: "mean", normalize: true }),
-  ])
+  let sourceVector = getCachedValue(embeddingCache, sourceCacheKey)
+  let targetVector = getCachedValue(embeddingCache, targetCacheKey)
+  const sourceCacheHit = Boolean(sourceVector)
+  const targetCacheHit = Boolean(targetVector)
 
-  const sourceVector = toVector(sourceFeatures)
-  const targetVector = toVector(targetFeatures)
+  cacheCounter.embeddingHits += sourceCacheHit ? 1 : 0
+  cacheCounter.embeddingHits += targetCacheHit ? 1 : 0
+  cacheCounter.embeddingMisses += sourceCacheHit ? 0 : 1
+  cacheCounter.embeddingMisses += targetCacheHit ? 0 : 1
+
+  if (!sourceVector || !targetVector) {
+    const extractor = await getExtractor(modelId)
+
+    const [sourceFeatures, targetFeatures] = await Promise.all([
+      sourceVector
+        ? Promise.resolve<unknown>(null)
+        : extractor(await getSourceRawImage(), { pooling: "mean", normalize: true }),
+      targetVector
+        ? Promise.resolve<unknown>(null)
+        : extractor(await getTargetRawImage(), { pooling: "mean", normalize: true }),
+    ])
+
+    if (!sourceVector && sourceFeatures) {
+      sourceVector = toVector(sourceFeatures)
+      setCachedValue(
+        embeddingCache,
+        sourceCacheKey,
+        sourceVector,
+        EMBEDDING_CACHE_LIMIT
+      )
+    }
+
+    if (!targetVector && targetFeatures) {
+      targetVector = toVector(targetFeatures)
+      setCachedValue(
+        embeddingCache,
+        targetCacheKey,
+        targetVector,
+        EMBEDDING_CACHE_LIMIT
+      )
+    }
+  }
+
+  if (!sourceVector || !targetVector) {
+    throw new Error("Embedding extraction returned empty vectors.")
+  }
+
   const embedding = cosineSimilarity(sourceVector, targetVector)
 
   return {
     modelId,
     embeddingSimilarity: embedding,
     hybridSimilarity: hybridSimilarity(embedding, pixel, weights),
+    latencyMs: elapsedMs(started),
+    embeddingCacheHit: sourceCacheHit && targetCacheHit,
   }
 }
 
@@ -205,35 +310,72 @@ async function compareRegions(
   modelIds: string[],
   weights: CompareWeights
 ): Promise<CompareResult> {
+  const totalStarted = nowMs()
   const ids = uniqueModelIds(modelIds)
   if (!ids.length) {
     throw new Error("Select at least one model before compare.")
   }
 
-  const [source, target] = await Promise.all([
-    decodeDataUrl(sourceDataUrl),
-    decodeDataUrl(targetDataUrl),
-  ])
+  const sourceImageKey = hashString(sourceDataUrl)
+  const targetImageKey = hashString(targetDataUrl)
+  const sourceTargetPairKey = `${sourceImageKey}|${targetImageKey}`
+  let sourceDecodedPromise: Promise<DecodedImage> | null = null
+  let targetDecodedPromise: Promise<DecodedImage> | null = null
+
+  const ensureSourceDecoded = () => {
+    if (!sourceDecodedPromise) {
+      sourceDecodedPromise = decodeDataUrl(sourceDataUrl)
+    }
+    return sourceDecodedPromise
+  }
+
+  const ensureTargetDecoded = () => {
+    if (!targetDecodedPromise) {
+      targetDecodedPromise = decodeDataUrl(targetDataUrl)
+    }
+    return targetDecodedPromise
+  }
+
+  const getSourceRawImage = async () => (await ensureSourceDecoded()).rawImage
+  const getTargetRawImage = async () => (await ensureTargetDecoded()).rawImage
   const normalizedWeights = normalizeWeights(weights)
+  const pixelStarted = nowMs()
+  let pixel = getCachedValue(pixelCache, sourceTargetPairKey)
+  const pixelCacheHit = typeof pixel === "number"
 
   try {
-    const sourceImageData = imageDataFromBitmap(source.bitmap)
-    const targetImageData = imageDataFromBitmap(
-      target.bitmap,
-      sourceImageData.width,
-      sourceImageData.height
-    )
+    if (typeof pixel !== "number") {
+      const [sourceDecoded, targetDecoded] = await Promise.all([
+        ensureSourceDecoded(),
+        ensureTargetDecoded(),
+      ])
+      const sourceImageData = imageDataFromBitmap(sourceDecoded.bitmap)
+      const targetImageData = imageDataFromBitmap(
+        targetDecoded.bitmap,
+        sourceImageData.width,
+        sourceImageData.height
+      )
 
-    const pixel = pixelSimilarity(sourceImageData, targetImageData)
+      pixel = pixelSimilarity(sourceImageData, targetImageData)
+      setCachedValue(pixelCache, sourceTargetPairKey, pixel, PIXEL_CACHE_LIMIT)
+    }
+    const pixelSimilarityScore = typeof pixel === "number" ? pixel : 0
+
+    const pixelTimingMs = elapsedMs(pixelStarted)
+    const embeddingStarted = nowMs()
+    const cacheCounter = { embeddingHits: 0, embeddingMisses: 0 }
 
     const perModelSettled = await Promise.allSettled(
       ids.map((modelId) =>
         compareWithModel(
           modelId,
-          source.rawImage,
-          target.rawImage,
-          pixel,
-          normalizedWeights
+          sourceImageKey,
+          targetImageKey,
+          getSourceRawImage,
+          getTargetRawImage,
+          pixelSimilarityScore,
+          normalizedWeights,
+          cacheCounter
         )
       )
     )
@@ -269,15 +411,44 @@ async function compareRegions(
 
     return {
       embeddingSimilarity,
-      pixelSimilarity: pixel,
+      pixelSimilarity: pixelSimilarityScore,
       hybridSimilarity: hybrid,
       aggregation: "minimum-across-models",
       usedWeights: normalizedWeights,
       perModelScores,
+      timingsMs: {
+        total: elapsedMs(totalStarted),
+        pixel: pixelTimingMs,
+        embedding: elapsedMs(embeddingStarted),
+      },
+      cacheStats: {
+        pixelCacheHit,
+        embeddingHits: cacheCounter.embeddingHits,
+        embeddingMisses: cacheCounter.embeddingMisses,
+      },
     }
   } finally {
-    source.bitmap.close()
-    target.bitmap.close()
+    if (sourceDecodedPromise) {
+      try {
+        const sourceDecoded = (await sourceDecodedPromise) as {
+          bitmap?: ImageBitmap
+        }
+        sourceDecoded.bitmap?.close()
+      } catch {
+        // no-op
+      }
+    }
+
+    if (targetDecodedPromise) {
+      try {
+        const targetDecoded = (await targetDecodedPromise) as {
+          bitmap?: ImageBitmap
+        }
+        targetDecoded.bitmap?.close()
+      } catch {
+        // no-op
+      }
+    }
   }
 }
 
@@ -286,6 +457,13 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     if (event.data.type === "init-model") {
       const initialized = await initModels(event.data.payload.modelIds)
       postMessageSafe({ type: "model-ready", payload: initialized })
+      return
+    }
+
+    if (event.data.type === "clear-cache") {
+      embeddingCache.clear()
+      pixelCache.clear()
+      postMessageSafe({ type: "cache-cleared" })
       return
     }
 

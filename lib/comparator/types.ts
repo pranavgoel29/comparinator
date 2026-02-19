@@ -17,6 +17,8 @@ export type PerModelScore = {
   modelId: string
   embeddingSimilarity: number // 0..1
   hybridSimilarity: number // 0..1
+  latencyMs: number
+  embeddingCacheHit: boolean
 }
 
 export type CompareResult = {
@@ -26,6 +28,16 @@ export type CompareResult = {
   aggregation: "minimum-across-models"
   usedWeights: CompareWeights
   perModelScores: PerModelScore[]
+  timingsMs: {
+    total: number
+    pixel: number
+    embedding: number
+  }
+  cacheStats: {
+    pixelCacheHit: boolean
+    embeddingHits: number
+    embeddingMisses: number
+  }
 }
 
 export type ModelInitResult = {
@@ -36,8 +48,10 @@ export type ModelInitResult = {
 export type WorkerRequest =
   | { type: "init-model"; payload: { modelIds: string[] } }
   | { type: "compare"; payload: CompareRequest }
+  | { type: "clear-cache" }
 
 export type WorkerResponse =
   | { type: "model-ready"; payload: ModelInitResult }
   | { type: "compare-result"; payload: CompareResult }
+  | { type: "cache-cleared" }
   | { type: "error"; message: string }

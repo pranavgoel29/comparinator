@@ -14,7 +14,9 @@ A browser-local Next.js app for comparing selected areas across images and bench
 - Produce a conservative ensemble score (minimum across selected models)
 - Tune model-vs-pixel weighting in the UI to fit your data
 - Tune speed via compare-size and quick mode controls
+- Use speed presets (`Fast`, `Balanced`, `Thorough`) and still tweak controls manually
 - Save many pairs and run a benchmark suite in one click
+- Select any benchmark case and inspect it in the main Results panel
 - Evaluate pass/fail using a threshold (default `0.85`)
 
 ## Run locally
@@ -33,9 +35,22 @@ Open [http://localhost:3000](http://localhost:3000).
 - Available model options now include CLIP Base Patch32, CLIP Base Patch16, CLIP Large Patch14, and SigLIP Base Patch16.
 - On first run, model files are downloaded in the browser and then cached by browser storage.
 - Comparison runs in a dedicated Web Worker to keep the UI responsive.
+- Runtime comparison cache is in-memory for the current tab/session:
+  - Pixel pair cache
+  - Per-model embedding cache
+- Re-running the same benchmark cases is typically faster due to cache hits.
+- Use `Clear runtime cache` in the UI when you want cold-run behavior again.
+
+## SigLIP notes
+
+- SigLIP is a vision-language embedding model trained with a sigmoid matching objective.
+- In this app it acts as an alternative semantic similarity signal versus CLIP.
+- `Fast` preset uses SigLIP-only with smaller compare size to reduce latency.
+- Final similarity still uses your hybrid weighting between model and pixel scores.
 
 ## Known limits
 
 - First compare can take noticeable time while model assets download.
 - Very large images increase memory use; compare-size control helps cap processing cost.
 - Benchmark suite currently runs sequentially on one worker for stable memory usage.
+- Runtime cache is not persisted across tab refreshes in this version.

@@ -31,6 +31,7 @@ const DEFAULT_MAX_COMPARE_SIDE = 224
 
 type ModelStatus = "idle" | "loading" | "ready" | "error"
 type BenchmarkCaseStatus = "idle" | "running" | "done" | "error"
+type BenchmarkPreset = "fast" | "balanced" | "thorough" | "custom"
 
 type BenchmarkCase = {
   id: string
@@ -101,6 +102,37 @@ function createBenchmarkCaseId() {
   return `case-${Date.now()}-${Math.round(Math.random() * 100000)}`
 }
 
+const PRESET_MODEL_IDS: Record<Exclude<BenchmarkPreset, "custom">, string[]> = {
+  fast: ["Xenova/siglip-base-patch16-224"],
+  balanced: ["Xenova/clip-vit-base-patch32", "Xenova/siglip-base-patch16-224"],
+  thorough: MODEL_CATALOG.map((model) => model.id),
+}
+
+const PRESET_COMPARE_SIZE: Record<Exclude<BenchmarkPreset, "custom">, number> = {
+  fast: 160,
+  balanced: 224,
+  thorough: 320,
+}
+
+const PRESET_QUICK_MODE: Record<Exclude<BenchmarkPreset, "custom">, boolean> = {
+  fast: true,
+  balanced: false,
+  thorough: false,
+}
+
+function presetLabel(preset: BenchmarkPreset) {
+  if (preset === "fast") {
+    return "Fast"
+  }
+  if (preset === "balanced") {
+    return "Balanced"
+  }
+  if (preset === "thorough") {
+    return "Thorough"
+  }
+  return "Custom"
+}
+
 export function ComparatorApp() {
   const [sourceBitmap, setSourceBitmap] = React.useState<ImageBitmap | null>(null)
   const [targetBitmap, setTargetBitmap] = React.useState<ImageBitmap | null>(null)
@@ -123,10 +155,19 @@ export function ComparatorApp() {
     DEFAULT_MAX_COMPARE_SIDE
   )
   const [quickMode, setQuickMode] = React.useState<boolean>(false)
+  const [selectedPreset, setSelectedPreset] =
+    React.useState<BenchmarkPreset>("custom")
+  const [lastNonCustomPreset, setLastNonCustomPreset] = React.useState<
+    Exclude<BenchmarkPreset, "custom"> | null
+  >(null)
 
   const [result, setResult] = React.useState<CompareResult | null>(null)
   const [sourceCropUrl, setSourceCropUrl] = React.useState<string | null>(null)
   const [targetCropUrl, setTargetCropUrl] = React.useState<string | null>(null)
+  const [selectedBenchmarkCaseId, setSelectedBenchmarkCaseId] = React.useState<
+    string | null
+  >(null)
+  const [runtimeInfo, setRuntimeInfo] = React.useState<string | null>(null)
 
   const [isComparing, setIsComparing] = React.useState(false)
   const [modelStatus, setModelStatus] = React.useState<ModelStatus>("idle")
@@ -147,6 +188,7 @@ export function ComparatorApp() {
     resolve: (value: CompareResult) => void
     reject: (error: Error) => void
   } | null>(null)
+  const applyingPresetRef = React.useRef(false)
 
   const pixelWeight = React.useMemo(
     () => Number((1 - embeddingWeight).toFixed(2)),
@@ -157,6 +199,20 @@ export function ComparatorApp() {
     const base = loadedModelIds.length ? loadedModelIds : selectedModelIds
     return quickMode ? base.slice(0, 1) : base
   }, [loadedModelIds, quickMode, selectedModelIds])
+
+  const markPresetAsCustom = React.useCallback(() => {
+    if (applyingPresetRef.current) {
+      return
+    }
+    setSelectedPreset((previous) => (previous === "custom" ? previous : "custom"))
+  }, [])
+
+  const selectedBenchmarkCase = React.useMemo(() => {
+    if (!selectedBenchmarkCaseId) {
+      return null
+    }
+    return benchmarkCases.find((item) => item.id === selectedBenchmarkCaseId) ?? null
+  }, [benchmarkCases, selectedBenchmarkCaseId])
 
   const benchmarkStats = React.useMemo(() => {
     const scored = benchmarkCases.filter(
@@ -241,6 +297,22 @@ export function ComparatorApp() {
     } satisfies WorkerRequest)
   }, [])
 
+  const applyPreset = React.useCallback(
+    (preset: Exclude<BenchmarkPreset, "custom">) => {
+      const modelIds = unique(PRESET_MODEL_IDS[preset])
+      applyingPresetRef.current = true
+      setSelectedPreset(preset)
+      setLastNonCustomPreset(preset)
+      setSelectedModelIds(modelIds)
+      setQuickMode(PRESET_QUICK_MODE[preset])
+      setMaxCompareSide(PRESET_COMPARE_SIZE[preset])
+      setRuntimeInfo(`${presetLabel(preset)} preset applied.`)
+      initWorkerModels(modelIds)
+      applyingPresetRef.current = false
+    },
+    [initWorkerModels]
+  )
+
   const executeCompare = React.useCallback(
     (payload: CompareRequest) => {
       if (!workerRef.current) {
@@ -298,6 +370,11 @@ export function ComparatorApp() {
         }
 
         setResult(message.payload)
+        return
+      }
+
+      if (message.type === "cache-cleared") {
+        setRuntimeInfo("Runtime cache cleared. Next compare will recompute everything.")
         return
       }
 
@@ -492,6 +569,7 @@ export function ComparatorApp() {
       setTargetCropUrl(targetRegion.dataUrl)
       setIsComparing(true)
       setModelError(null)
+      setRuntimeInfo(null)
 
       const nextResult = await executeCompare(request)
       setResult(nextResult)
@@ -515,11 +593,36 @@ export function ComparatorApp() {
         return
       }
 
+      markPresetAsCustom()
       setSelectedModelIds(next)
       initWorkerModels(next)
     },
-    [initWorkerModels, selectedModelIds]
+    [initWorkerModels, markPresetAsCustom, selectedModelIds]
   )
+
+  const handleQuickModeChange = React.useCallback(
+    (nextValue: boolean) => {
+      setQuickMode(nextValue)
+      markPresetAsCustom()
+    },
+    [markPresetAsCustom]
+  )
+
+  const handleMaxCompareSideChange = React.useCallback(
+    (nextValue: number) => {
+      setMaxCompareSide(nextValue)
+      markPresetAsCustom()
+    },
+    [markPresetAsCustom]
+  )
+
+  const clearRuntimeCache = React.useCallback(() => {
+    if (!workerRef.current) {
+      setModelError("Worker is not ready yet.")
+      return
+    }
+    workerRef.current.postMessage({ type: "clear-cache" } satisfies WorkerRequest)
+  }, [])
 
   const addCurrentPairToBenchmark = React.useCallback(() => {
     try {
@@ -568,6 +671,7 @@ export function ComparatorApp() {
 
     setIsRunningBenchmark(true)
     setModelError(null)
+    setRuntimeInfo(null)
 
     const casesSnapshot = [...benchmarkCases]
 
@@ -644,6 +748,11 @@ export function ComparatorApp() {
 
   const removeBenchmarkCase = React.useCallback((id: string) => {
     setBenchmarkCases((previous) => previous.filter((entry) => entry.id !== id))
+    setSelectedBenchmarkCaseId((previous) => (previous === id ? null : previous))
+  }, [])
+
+  const selectBenchmarkCase = React.useCallback((id: string) => {
+    setSelectedBenchmarkCaseId(id)
   }, [])
 
   const canCompare =
@@ -652,6 +761,17 @@ export function ComparatorApp() {
     !isRunningBenchmark &&
     activeModelIds.length > 0 &&
     Boolean(sourceBitmap && targetBitmap && sourceBBox && targetBBox)
+
+  const displayedResult = selectedBenchmarkCase?.result ?? result
+  const displayedSourceCropUrl = selectedBenchmarkCase?.sourceDataUrl ?? sourceCropUrl
+  const displayedTargetCropUrl = selectedBenchmarkCase?.targetDataUrl ?? targetCropUrl
+  const resultsViewMode: "benchmark" | "live" = selectedBenchmarkCase
+    ? "benchmark"
+    : "live"
+  const selectedCaseDurationMs =
+    selectedBenchmarkCase?.result?.timingsMs.total ??
+    selectedBenchmarkCase?.durationMs ??
+    null
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -747,6 +867,58 @@ export function ComparatorApp() {
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="space-y-3 rounded-xl border border-border bg-muted/25 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                  Speed Presets
+                </h3>
+                <Badge variant="outline">Mode: {presetLabel(selectedPreset)}</Badge>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Presets are one-click starting points. You can still edit all controls manually at any time.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant={selectedPreset === "fast" ? "default" : "outline"}
+                  onClick={() => applyPreset("fast")}
+                >
+                  Fast
+                </Button>
+                <Button
+                  type="button"
+                  variant={selectedPreset === "balanced" ? "default" : "outline"}
+                  onClick={() => applyPreset("balanced")}
+                >
+                  Balanced
+                </Button>
+                <Button
+                  type="button"
+                  variant={selectedPreset === "thorough" ? "default" : "outline"}
+                  onClick={() => applyPreset("thorough")}
+                >
+                  Thorough
+                </Button>
+                {selectedPreset === "custom" && lastNonCustomPreset ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => applyPreset(lastNonCustomPreset)}
+                  >
+                    Reapply {presetLabel(lastNonCustomPreset)}
+                  </Button>
+                ) : null}
+              </div>
+              <div className="rounded-lg border border-border bg-background/80 p-3 text-xs text-muted-foreground">
+                <p>
+                  SigLIP is a vision-language embedding model trained with a sigmoid matching objective. It gives an alternative semantic signal versus CLIP.
+                </p>
+                <p className="mt-1">
+                  Fast preset uses SigLIP-only + smaller compare size. Final score still combines model semantics and pixel similarity using your weights.
+                </p>
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <div className="space-y-3 rounded-xl border border-border bg-muted/25 p-4">
                 <div className="flex items-center justify-between">
@@ -842,7 +1014,7 @@ export function ComparatorApp() {
                     step={32}
                     value={maxCompareSide}
                     onChange={(event) =>
-                      setMaxCompareSide(Number(event.currentTarget.value))
+                      handleMaxCompareSideChange(Number(event.currentTarget.value))
                     }
                     className="w-full accent-primary"
                   />
@@ -852,7 +1024,9 @@ export function ComparatorApp() {
                   <input
                     type="checkbox"
                     checked={quickMode}
-                    onChange={(event) => setQuickMode(event.currentTarget.checked)}
+                    onChange={(event) =>
+                      handleQuickModeChange(event.currentTarget.checked)
+                    }
                     className="mt-0.5 accent-primary"
                   />
                   <span>
@@ -932,6 +1106,11 @@ export function ComparatorApp() {
                   Runtime: <span className="text-foreground">{MODEL_CONFIG.runtime}</span> | Aggregation:{" "}
                   <span className="text-foreground">{MODEL_CONFIG.aggregation}</span>
                 </p>
+                {runtimeInfo ? (
+                  <p className="rounded border border-emerald-500/35 bg-emerald-500/10 px-2 py-1 text-emerald-700 dark:text-emerald-300">
+                    {runtimeInfo}
+                  </p>
+                ) : null}
                 {failedModelMessages.length ? (
                   <div className="space-y-1 rounded border border-destructive/35 bg-destructive/10 p-2 text-destructive">
                     <p className="font-medium">Model warnings:</p>
@@ -948,6 +1127,9 @@ export function ComparatorApp() {
                   onClick={() => initWorkerModels(selectedModelIds)}
                 >
                   Reinitialize models
+                </Button>
+                <Button variant="outline" onClick={clearRuntimeCache}>
+                  Clear runtime cache
                 </Button>
                 <Button
                   variant="outline"
@@ -1002,6 +1184,9 @@ export function ComparatorApp() {
                   <Badge variant="outline">
                     Threshold: {threshold.toFixed(2)}
                   </Badge>
+                  <Badge variant="outline">
+                    Results view: {selectedBenchmarkCase ? "Pinned benchmark case" : "Live compare"}
+                  </Badge>
                   <Badge
                     className={
                       isRunningBenchmark
@@ -1013,6 +1198,11 @@ export function ComparatorApp() {
                   </Badge>
                 </div>
               </div>
+              {selectedBenchmarkCase ? (
+                <p className="rounded-md border border-primary/30 bg-primary/10 px-2 py-1 text-xs text-foreground">
+                  Showing in Results: {selectedBenchmarkCase.label}
+                </p>
+              ) : null}
 
               <div className="space-y-1">
                 <div className="h-2 overflow-hidden rounded-full bg-background">
@@ -1101,7 +1291,10 @@ export function ComparatorApp() {
               </Button>
               <Button
                 variant="outline"
-                onClick={() => setBenchmarkCases([])}
+                onClick={() => {
+                  setBenchmarkCases([])
+                  setSelectedBenchmarkCaseId(null)
+                }}
                 disabled={isComparing || isRunningBenchmark || !benchmarkCases.length}
               >
                 Clear all cases
@@ -1113,7 +1306,20 @@ export function ComparatorApp() {
                 {benchmarkCases.map((item, index) => (
                   <div
                     key={item.id}
-                    className="space-y-3 rounded-lg border border-border bg-muted/20 p-3 md:p-4"
+                    className={`space-y-3 rounded-lg border p-3 transition-colors md:p-4 ${
+                      selectedBenchmarkCaseId === item.id
+                        ? "border-primary/60 bg-primary/5 ring-1 ring-primary/40"
+                        : "border-border bg-muted/20"
+                    }`}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => selectBenchmarkCase(item.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault()
+                        selectBenchmarkCase(item.id)
+                      }
+                    }}
                   >
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <div className="space-y-1">
@@ -1126,6 +1332,11 @@ export function ComparatorApp() {
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2">
+                        {selectedBenchmarkCaseId === item.id ? (
+                          <Badge className="border-primary/40 bg-primary/10 text-primary">
+                            showing in results
+                          </Badge>
+                        ) : null}
                         <Badge className={benchmarkStatusChipClass(item.status)}>
                           status: {item.status}
                         </Badge>
@@ -1219,6 +1430,12 @@ export function ComparatorApp() {
                                 </span>
                               </p>
                               <p>
+                                worker:{" "}
+                                <span className="font-medium text-foreground">
+                                  total {item.result.timingsMs.total} ms
+                                </span>
+                              </p>
+                              <p>
                                 threshold:{" "}
                                 <span className="font-medium text-foreground">
                                   {threshold.toFixed(2)}
@@ -1235,6 +1452,12 @@ export function ComparatorApp() {
                                 aggregation:{" "}
                                 <span className="font-medium text-foreground">
                                   {item.result.aggregation}
+                                </span>
+                              </p>
+                              <p>
+                                cache:{" "}
+                                <span className="font-medium text-foreground">
+                                  pixel {item.result.cacheStats.pixelCacheHit ? "hit" : "miss"} | embedding {item.result.cacheStats.embeddingHits}/{item.result.cacheStats.embeddingMisses}
                                 </span>
                               </p>
                             </div>
@@ -1256,6 +1479,10 @@ export function ComparatorApp() {
                                       embedding {model.embeddingSimilarity.toFixed(4)} | hybrid{" "}
                                       {model.hybridSimilarity.toFixed(4)}
                                     </p>
+                                    <p className="text-muted-foreground">
+                                      latency {model.latencyMs} ms | embedding cache{" "}
+                                      {model.embeddingCacheHit ? "hit" : "miss"}
+                                    </p>
                                   </div>
                                 ))}
                               </div>
@@ -1270,11 +1497,24 @@ export function ComparatorApp() {
                         )}
                       </div>
 
-                      <div className="flex justify-start lg:justify-end">
+                      <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => removeBenchmarkCase(item.id)}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            selectBenchmarkCase(item.id)
+                          }}
+                        >
+                          View in Results
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            removeBenchmarkCase(item.id)
+                          }}
                           disabled={isRunningBenchmark}
                         >
                           Remove
@@ -1297,13 +1537,17 @@ export function ComparatorApp() {
         </Card>
 
         <ResultsPanel
-          result={result}
+          result={displayedResult}
           threshold={threshold}
-          sourceCropUrl={sourceCropUrl}
-          targetCropUrl={targetCropUrl}
+          sourceCropUrl={displayedSourceCropUrl}
+          targetCropUrl={displayedTargetCropUrl}
           modelStatus={modelStatus}
           modelError={modelError}
           isComparing={isComparing || isRunningBenchmark}
+          viewMode={resultsViewMode}
+          selectedCaseLabel={selectedBenchmarkCase?.label}
+          selectedCaseStatus={selectedBenchmarkCase?.status}
+          selectedCaseDurationMs={selectedCaseDurationMs}
         />
       </div>
     </main>

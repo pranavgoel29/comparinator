@@ -16,6 +16,10 @@ type ResultsPanelProps = {
   modelStatus: "idle" | "loading" | "ready" | "error"
   modelError: string | null
   isComparing: boolean
+  viewMode: "live" | "benchmark"
+  selectedCaseLabel?: string
+  selectedCaseStatus?: "idle" | "running" | "done" | "error"
+  selectedCaseDurationMs?: number | null
 }
 
 type Verdict = "PASS" | "FAIL"
@@ -119,6 +123,10 @@ export function ResultsPanel({
   modelStatus,
   modelError,
   isComparing,
+  viewMode,
+  selectedCaseLabel,
+  selectedCaseStatus,
+  selectedCaseDurationMs,
 }: ResultsPanelProps) {
   const verdict: Verdict | null = result
     ? isPass(result.hybridSimilarity, threshold)
@@ -141,6 +149,15 @@ export function ResultsPanel({
           Results
         </CardTitle>
         <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline">view: {viewMode}</Badge>
+          {selectedCaseLabel && viewMode === "benchmark" ? (
+            <Badge variant="outline" className="max-w-[420px] truncate">
+              case: {selectedCaseLabel}
+            </Badge>
+          ) : null}
+          {selectedCaseStatus && viewMode === "benchmark" ? (
+            <Badge variant="outline">case status: {selectedCaseStatus}</Badge>
+          ) : null}
           <Badge className={statusChipClass(modelStatus)}>engine: {modelStatus}</Badge>
           {verdict ? (
             <Badge className={verdictChipClass(verdict)}>
@@ -248,6 +265,47 @@ export function ResultsPanel({
                   embedding {result.usedWeights.embedding.toFixed(2)} / pixel {result.usedWeights.pixel.toFixed(2)}
                 </span>
               </p>
+              <div className="grid gap-2 text-xs sm:grid-cols-2">
+                <div className="rounded border border-border bg-muted/20 p-2">
+                  <p className="uppercase tracking-[0.12em] text-muted-foreground">
+                    Timing
+                  </p>
+                  <p className="text-muted-foreground">
+                    total <span className="font-semibold text-foreground">{result.timingsMs.total} ms</span> | pixel{" "}
+                    <span className="font-semibold text-foreground">{result.timingsMs.pixel} ms</span> | embedding{" "}
+                    <span className="font-semibold text-foreground">{result.timingsMs.embedding} ms</span>
+                  </p>
+                </div>
+                <div className="rounded border border-border bg-muted/20 p-2">
+                  <p className="uppercase tracking-[0.12em] text-muted-foreground">
+                    Cache
+                  </p>
+                  <p className="text-muted-foreground">
+                    pixel cache{" "}
+                    <span className="font-semibold text-foreground">
+                      {result.cacheStats.pixelCacheHit ? "hit" : "miss"}
+                    </span>{" "}
+                    | embedding hits{" "}
+                    <span className="font-semibold text-foreground">
+                      {result.cacheStats.embeddingHits}
+                    </span>{" "}
+                    / misses{" "}
+                    <span className="font-semibold text-foreground">
+                      {result.cacheStats.embeddingMisses}
+                    </span>
+                  </p>
+                </div>
+              </div>
+              {viewMode === "benchmark" ? (
+                <p className="text-xs text-muted-foreground">
+                  Benchmark run duration:{" "}
+                  <span className="font-semibold text-foreground">
+                    {typeof selectedCaseDurationMs === "number"
+                      ? `${selectedCaseDurationMs} ms`
+                      : "-"}
+                  </span>
+                </p>
+              ) : null}
 
               <div className="space-y-2 rounded-md border border-border bg-muted/20 p-3">
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
@@ -275,6 +333,10 @@ export function ResultsPanel({
                       <p className="text-muted-foreground">
                         embedding {item.embeddingSimilarity.toFixed(4)} | hybrid {item.hybridSimilarity.toFixed(4)}
                       </p>
+                      <p className="text-muted-foreground">
+                        latency {item.latencyMs} ms | embedding cache{" "}
+                        {item.embeddingCacheHit ? "hit" : "miss"}
+                      </p>
                       <div className="h-1.5 overflow-hidden rounded bg-muted">
                         <div
                           className={`h-full rounded transition-all duration-500 ${
@@ -296,9 +358,22 @@ export function ResultsPanel({
               </div>
             </div>
           ) : (
-            <p className="rounded-md border border-border bg-muted/20 px-3 py-4 text-sm text-muted-foreground">
-              Compare selected areas to see conservative multi-model scores and per-model breakdown.
-            </p>
+            <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-4 text-sm text-muted-foreground">
+              {viewMode === "benchmark" ? (
+                <>
+                  <p>
+                    This benchmark case is selected but has no score yet.
+                  </p>
+                  <p>
+                    Status: <span className="font-semibold text-foreground">{selectedCaseStatus ?? "idle"}</span>
+                  </p>
+                </>
+              ) : (
+                <p>
+                  Compare selected areas to see conservative multi-model scores and per-model breakdown.
+                </p>
+              )}
+            </div>
           )}
         </div>
 
