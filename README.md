@@ -67,3 +67,7 @@ Open [http://localhost:3000](http://localhost:3000).
 - Benchmark pool duplicates model memory per worker by design; use fewer models or lower compare size on lower-memory devices.
 - Changing model set/preset resets benchmark worker caches for correctness.
 - Runtime compute cache is not persisted across tab refreshes; only session inputs/state are persisted.
+
+## Security note
+
+- In connected environments, run `pnpm audit --prod` as part of regular dependency hygiene.

@@ -2,16 +2,40 @@
 
 import * as React from "react"
 import Image from "next/image"
+import Link from "next/link"
 
 import { BBoxEditorCanvas } from "@/components/comparator/bbox-editor-canvas"
 import { BBoxJsonEditor } from "@/components/comparator/bbox-json-editor"
 import { ImageUploadPanel } from "@/components/comparator/image-upload-panel"
 import { ResultsPanel } from "@/components/comparator/results-panel"
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import {
+  buildBenchmarkRunSnapshot,
+  isCorrectOutcome,
+  predictedOutcomeFromScore,
+} from "@/lib/comparator/benchmark-analytics"
 import { createDefaultBBox, isBBoxAtLeastMinPixels } from "@/lib/comparator/bbox"
 import { cropImageRegion, fileToImageBitmap, resizeCroppedRegion } from "@/lib/comparator/image"
+import {
+  MODEL_SELECTION_MAX_MODELS,
+  normalizeModelId,
+  normalizeUniqueModelIds,
+  validateModelId,
+  validateModelSelectionCount,
+} from "@/lib/comparator/model-id"
 import {
   clearBenchmarkPoolCache,
   disposeBenchmarkPool,
@@ -26,6 +50,7 @@ import {
   MODEL_CONFIG,
   modelLabelFromId,
 } from "@/lib/comparator/model-config"
+import { saveLiveBenchmarkSnapshot } from "@/lib/comparator/live-snapshot"
 import {
   clearLatestSession,
   loadLatestSession,
@@ -35,8 +60,12 @@ import {
 } from "@/lib/comparator/session-store"
 import { isPass } from "@/lib/comparator/metrics"
 import type {
+  BenchmarkRunSnapshot,
   CompareRequest,
   CompareResult,
+  ExpectedOutcome,
+  ModelDownloadProgress,
+  ModelRuntimeStatus,
   NormalizedBBox,
   WorkerRequest,
   WorkerResponse,
@@ -45,6 +74,7 @@ import type {
 const DEFAULT_THRESHOLD = 0.85
 const DEFAULT_MAX_COMPARE_SIDE = 224
 const SESSION_SAVE_DEBOUNCE_MS = 400
+const DEFAULT_EXPECTED_OUTCOME: ExpectedOutcome = "match"
 
 type ModelStatus = "idle" | "loading" | "ready" | "error"
 type BenchmarkCaseStatus = "idle" | "running" | "done" | "error"
@@ -63,6 +93,7 @@ type BenchmarkCase = {
   result: CompareResult | null
   error: string | null
   durationMs: number | null
+  expectedOutcome: ExpectedOutcome
 }
 
 function isBenchmarkPreset(value: unknown): value is BenchmarkPreset {
@@ -94,10 +125,11 @@ function toRuntimeBenchmarkCase(
       height: persisted.targetPayload.height,
       rgba: new Uint8ClampedArray(persisted.targetPayload.rgba),
     },
-    status: "idle",
-    result: null,
-    error: null,
-    durationMs: null,
+    status: persisted.status,
+    result: persisted.result,
+    error: persisted.error,
+    durationMs: persisted.durationMs,
+    expectedOutcome: persisted.expectedOutcome,
   }
 }
 
@@ -119,6 +151,11 @@ function toPersistedBenchmarkCase(caseItem: BenchmarkCase): PersistedBenchmarkCa
       height: caseItem.targetPayload.height,
       rgba: new Uint8ClampedArray(caseItem.targetPayload.rgba),
     },
+    expectedOutcome: caseItem.expectedOutcome,
+    status: caseItem.status,
+    result: caseItem.result,
+    error: caseItem.error,
+    durationMs: caseItem.durationMs,
   }
 }
 
@@ -167,7 +204,7 @@ function formatMs(value: number | null) {
 }
 
 function unique(ids: string[]) {
-  return Array.from(new Set(ids))
+  return normalizeUniqueModelIds(ids)
 }
 
 function createBenchmarkCaseId() {
@@ -176,6 +213,40 @@ function createBenchmarkCaseId() {
   }
 
   return `case-${Date.now()}-${Math.round(Math.random() * 100000)}`
+}
+
+function formatBytes(sizeBytes: number | null) {
+  if (sizeBytes === null) {
+    return "unknown"
+  }
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`
+  }
+  const units = ["KB", "MB", "GB", "TB"]
+  let value = sizeBytes / 1024
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[unitIndex]}`
+}
+
+function modelPhaseBadgeClass(phase: ModelRuntimeStatus["phase"]) {
+  if (phase === "ready") {
+    return "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+  }
+  if (phase === "metadata-loading" || phase === "initializing") {
+    return "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+  }
+  if (phase === "error") {
+    return "border-destructive/40 bg-destructive/10 text-destructive"
+  }
+  return "border-border text-muted-foreground"
+}
+
+function formatOutcome(outcome: ExpectedOutcome) {
+  return outcome === "match" ? "match" : "non-match"
 }
 
 const PRESET_MODEL_IDS: Record<Exclude<BenchmarkPreset, "custom">, string[]> = {
@@ -267,8 +338,18 @@ export function ComparatorApp() {
   const [customModelError, setCustomModelError] = React.useState<string | null>(null)
   const [loadedModelIds, setLoadedModelIds] = React.useState<string[]>([])
   const [failedModelMessages, setFailedModelMessages] = React.useState<string[]>([])
+  const [modelRuntimeStatuses, setModelRuntimeStatuses] = React.useState<
+    Record<string, ModelRuntimeStatus>
+  >({})
+  const [modelDownloadProgress, setModelDownloadProgress] = React.useState<
+    Record<string, ModelDownloadProgress>
+  >({})
+  const [isModelStatusDialogOpen, setIsModelStatusDialogOpen] =
+    React.useState<boolean>(false)
 
   const [benchmarkCases, setBenchmarkCases] = React.useState<BenchmarkCase[]>([])
+  const [latestRunSnapshot, setLatestRunSnapshot] =
+    React.useState<BenchmarkRunSnapshot | null>(null)
   const [isRunningBenchmark, setIsRunningBenchmark] = React.useState(false)
   const [isSessionHydrated, setIsSessionHydrated] = React.useState(false)
   const [workerMounted, setWorkerMounted] = React.useState(false)
@@ -294,7 +375,7 @@ export function ComparatorApp() {
   const embeddingRequired = embeddingWeight > 0
 
   const activeModelIds = React.useMemo(() => {
-    const base = loadedModelIds.length ? loadedModelIds : selectedModelIds
+    const base = unique(loadedModelIds.length ? loadedModelIds : selectedModelIds)
     return quickMode ? base.slice(0, 1) : base
   }, [loadedModelIds, quickMode, selectedModelIds])
 
@@ -325,6 +406,27 @@ export function ComparatorApp() {
     }
     return benchmarkCases.find((item) => item.id === selectedBenchmarkCaseId) ?? null
   }, [benchmarkCases, selectedBenchmarkCaseId])
+
+  const modelStatusRows = React.useMemo(() => {
+    return unique(selectedModelIds).map((modelId) => {
+      const status = modelRuntimeStatuses[modelId]
+      const progress = modelDownloadProgress[modelId]
+      return (
+        {
+          modelId,
+          phase: status?.phase ?? "idle",
+          sizeBytes: status?.sizeBytes ?? progress?.total ?? null,
+          sizeSource: status?.sizeSource ?? "unknown",
+          error: status?.error ?? null,
+          updatedAt: status?.updatedAt ?? progress?.updatedAt ?? 0,
+          progress: progress?.progress ?? (status?.phase === "ready" ? 100 : null),
+          progressFile: progress?.file ?? null,
+          progressLoaded: progress?.loaded ?? null,
+          progressTotal: progress?.total ?? null,
+        }
+      )
+    })
+  }, [modelDownloadProgress, modelRuntimeStatuses, selectedModelIds])
 
   const benchmarkStats = React.useMemo(() => {
     const scored = benchmarkCases.filter(
@@ -394,18 +496,94 @@ export function ComparatorApp() {
     }
   }, [benchmarkCases, threshold])
 
+  const analyticsSnapshotFromCurrentResults = React.useMemo(() => {
+    const hasAnyProcessed = benchmarkCases.some(
+      (item) => item.status === "done" || item.status === "error"
+    )
+    if (!hasAnyProcessed) {
+      return latestRunSnapshot
+    }
+
+    const modelIdsFromResults = unique(
+      benchmarkCases.flatMap((item) =>
+        item.result ? item.result.perModelScores.map((model) => model.modelId) : []
+      )
+    )
+    const modelIdsForSnapshot = unique([...selectedModelIds, ...modelIdsFromResults])
+
+    return buildBenchmarkRunSnapshot({
+      cases: benchmarkCases,
+      threshold,
+      weights: {
+        embedding: embeddingWeight,
+        pixel: pixelWeight,
+      },
+      modelIds: modelIdsForSnapshot,
+    })
+  }, [
+    benchmarkCases,
+    embeddingWeight,
+    latestRunSnapshot,
+    pixelWeight,
+    selectedModelIds,
+    threshold,
+  ])
+
   const initWorkerModels = React.useCallback((modelIds: string[]) => {
     if (!workerRef.current) {
+      return
+    }
+    const nextModelIds = unique(modelIds)
+    if (!validateModelSelectionCount(nextModelIds)) {
+      setModelError(
+        `Select at most ${MODEL_SELECTION_MAX_MODELS} models.`
+      )
+      return
+    }
+    const invalidModel = nextModelIds.find((modelId) => Boolean(validateModelId(modelId)))
+    if (invalidModel) {
+      setModelError(validateModelId(invalidModel))
       return
     }
 
     setModelStatus("loading")
     setModelError(null)
     setFailedModelMessages([])
+    setModelDownloadProgress((previous) => {
+      const next = { ...previous }
+      for (const modelId of nextModelIds) {
+        next[modelId] = {
+          modelId,
+          status: "initiate",
+          file: null,
+          progress: 0,
+          loaded: null,
+          total: null,
+          updatedAt: Date.now(),
+        }
+      }
+      return next
+    })
+    setModelRuntimeStatuses((previous) => {
+      const now = Date.now()
+      const next = { ...previous }
+      for (const modelId of nextModelIds) {
+        const current = next[modelId]
+        next[modelId] = {
+          modelId,
+          phase: "metadata-loading",
+          sizeBytes: current?.sizeBytes ?? null,
+          sizeSource: current?.sizeSource ?? "unknown",
+          error: null,
+          updatedAt: now,
+        }
+      }
+      return next
+    })
 
     workerRef.current.postMessage({
       type: "init-model",
-      payload: { modelIds },
+      payload: { modelIds: nextModelIds },
     } satisfies WorkerRequest)
   }, [])
 
@@ -465,9 +643,30 @@ export function ComparatorApp() {
 
     worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       const message = event.data
+      if (message.type === "model-progress") {
+        setModelDownloadProgress((previous) => ({
+          ...previous,
+          [message.payload.modelId]: message.payload,
+        }))
+        return
+      }
+      if (message.type === "model-status") {
+        setModelRuntimeStatuses((previous) => ({
+          ...previous,
+          [message.payload.modelId]: message.payload,
+        }))
+        return
+      }
 
       if (message.type === "model-ready") {
         setLoadedModelIds(message.payload.loadedModelIds)
+        setModelRuntimeStatuses((previous) => {
+          const next = { ...previous }
+          for (const status of message.payload.modelStatuses) {
+            next[status.modelId] = status
+          }
+          return next
+        })
         setFailedModelMessages(
           message.payload.failedModels.map(
             (item) => `${modelLabelFromId(item.modelId)}: ${item.error}`
@@ -650,7 +849,10 @@ export function ComparatorApp() {
         setLastNonCustomPreset(session.controls.lastNonCustomPreset)
         setSelectedModelIds(
           session.controls.selectedModelIds.length
-            ? unique(session.controls.selectedModelIds)
+            ? unique(session.controls.selectedModelIds).slice(
+                0,
+                MODEL_SELECTION_MAX_MODELS
+              )
             : [...MODEL_CONFIG.defaultModelIds]
         )
 
@@ -658,6 +860,7 @@ export function ComparatorApp() {
           toRuntimeBenchmarkCase(item)
         )
         setBenchmarkCases(restoredCases)
+        setLatestRunSnapshot(session.benchmark.latestRunSnapshot)
 
         const selectedId =
           session.benchmark.selectedBenchmarkCaseId &&
@@ -665,9 +868,13 @@ export function ComparatorApp() {
             ? session.benchmark.selectedBenchmarkCaseId
             : null
         setSelectedBenchmarkCaseId(selectedId)
-        setResult(null)
-        setSourceCropUrl(null)
-        setTargetCropUrl(null)
+        if (selectedId) {
+          const selectedCase =
+            restoredCases.find((item) => item.id === selectedId) ?? null
+          setResult(selectedCase?.result ?? null)
+          setSourceCropUrl(selectedCase?.sourceDataUrl ?? null)
+          setTargetCropUrl(selectedCase?.targetDataUrl ?? null)
+        }
         setRuntimeInfo("Restored previous session.")
       } catch (error) {
         if (cancelled) {
@@ -758,6 +965,7 @@ export function ComparatorApp() {
         benchmark: {
           cases: persistedCases,
           selectedBenchmarkCaseId: selectedId,
+          latestRunSnapshot,
         },
       }
 
@@ -788,6 +996,7 @@ export function ComparatorApp() {
     isRunningBenchmark,
     isSessionHydrated,
     lastNonCustomPreset,
+    latestRunSnapshot,
     maxCompareSide,
     minAreaPixels,
     quickMode,
@@ -804,6 +1013,10 @@ export function ComparatorApp() {
     targetLockAreaOnUpload,
     threshold,
   ])
+
+  React.useEffect(() => {
+    saveLiveBenchmarkSnapshot(analyticsSnapshotFromCurrentResults)
+  }, [analyticsSnapshotFromCurrentResults])
 
   const sourceDimensions = sourceBitmap
     ? { width: sourceBitmap.width, height: sourceBitmap.height }
@@ -971,12 +1184,24 @@ export function ComparatorApp() {
 
   const toggleModel = React.useCallback(
     (modelId: string, checked: boolean) => {
+      const normalizedModelId = normalizeModelId(modelId)
       const next = checked
-        ? unique([...selectedModelIds, modelId])
-        : selectedModelIds.filter((id) => id !== modelId)
+        ? unique([...selectedModelIds, normalizedModelId])
+        : selectedModelIds.filter((id) => id !== normalizedModelId)
 
       if (!next.length) {
         setModelError("Select at least one model.")
+        return
+      }
+      if (!validateModelSelectionCount(next)) {
+        setModelError(
+          `Select at most ${MODEL_SELECTION_MAX_MODELS} models.`
+        )
+        return
+      }
+      const invalidModel = next.find((entry) => Boolean(validateModelId(entry)))
+      if (invalidModel) {
+        setModelError(validateModelId(invalidModel))
         return
       }
 
@@ -988,17 +1213,16 @@ export function ComparatorApp() {
   )
 
   const addCustomModel = React.useCallback(() => {
-    const modelId = customModelId.trim()
+    const modelId = normalizeModelId(customModelId)
 
     if (!modelId) {
       setCustomModelError("Enter a model ID.")
       return
     }
 
-    if (!modelId.includes("/")) {
-      setCustomModelError(
-        "Use a repo-style ID, for example Xenova/clip-vit-base-patch32."
-      )
+    const validationError = validateModelId(modelId)
+    if (validationError) {
+      setCustomModelError(validationError)
       return
     }
 
@@ -1008,6 +1232,12 @@ export function ComparatorApp() {
     }
 
     const next = unique([...selectedModelIds, modelId])
+    if (!validateModelSelectionCount(next)) {
+      setCustomModelError(
+        `Select at most ${MODEL_SELECTION_MAX_MODELS} models.`
+      )
+      return
+    }
     markPresetAsCustom()
     setSelectedModelIds(next)
     setCustomModelId("")
@@ -1053,6 +1283,8 @@ export function ComparatorApp() {
       await clearLatestSession()
       setRuntimeInfo("Saved session cleared from browser storage.")
       setModelError(null)
+      setLatestRunSnapshot(null)
+      saveLiveBenchmarkSnapshot(null)
       saveErrorShownRef.current = false
     } catch (error) {
       const message =
@@ -1090,6 +1322,7 @@ export function ComparatorApp() {
         result: null,
         error: null,
         durationMs: null,
+        expectedOutcome: DEFAULT_EXPECTED_OUTCOME,
       }
 
       setBenchmarkCases((previous) => [...previous, nextCase])
@@ -1116,7 +1349,7 @@ export function ComparatorApp() {
       return
     }
 
-    if (embeddingRequired && !activeModelIds.length) {
+    if (embeddingRequired && !selectedModelIds.length) {
       setModelError("No initialized models available for benchmark.")
       return
     }
@@ -1129,9 +1362,21 @@ export function ComparatorApp() {
 
     setIsRunningBenchmark(true)
     setModelError(null)
-    const modelIdsForRun = embeddingRequired ? activeModelIds : []
+    const modelIdsForRun = embeddingRequired ? unique(selectedModelIds) : []
     const casesSnapshot = [...benchmarkCases]
     const caseLookup = new Map(casesSnapshot.map((item) => [item.id, item]))
+    const runCaseState = new Map<string, BenchmarkCase>(
+      casesSnapshot.map((item) => [
+        item.id,
+        {
+          ...item,
+          status: "idle" as BenchmarkCaseStatus,
+          result: null,
+          error: null,
+          durationMs: null,
+        },
+      ])
+    )
     const caseIds = new Set(casesSnapshot.map((item) => item.id))
     const poolSize = getAdaptiveBenchmarkPoolSize(casesSnapshot.length)
 
@@ -1191,6 +1436,11 @@ export function ComparatorApp() {
             if (benchmarkRunIdRef.current !== runId) {
               return
             }
+            const tracked = runCaseState.get(taskId)
+            if (tracked) {
+              tracked.status = "running"
+              tracked.error = null
+            }
             setBenchmarkCases((previous) =>
               previous.map((entry) =>
                 entry.id === taskId
@@ -1206,6 +1456,13 @@ export function ComparatorApp() {
           onTaskComplete: (taskId, nextResult, durationMs) => {
             if (benchmarkRunIdRef.current !== runId) {
               return
+            }
+            const tracked = runCaseState.get(taskId)
+            if (tracked) {
+              tracked.status = "done"
+              tracked.result = nextResult
+              tracked.error = null
+              tracked.durationMs = durationMs
             }
             setBenchmarkCases((previous) =>
               previous.map((entry) =>
@@ -1223,6 +1480,7 @@ export function ComparatorApp() {
 
             const taskCase = caseLookup.get(taskId)
             if (taskCase) {
+              setSelectedBenchmarkCaseId(taskId)
               setResult(nextResult)
               setSourceCropUrl(taskCase.sourceDataUrl)
               setTargetCropUrl(taskCase.targetDataUrl)
@@ -1231,6 +1489,12 @@ export function ComparatorApp() {
           onTaskError: (taskId, error, durationMs) => {
             if (benchmarkRunIdRef.current !== runId) {
               return
+            }
+            const tracked = runCaseState.get(taskId)
+            if (tracked) {
+              tracked.status = "error"
+              tracked.error = error
+              tracked.durationMs = durationMs
             }
             setBenchmarkCases((previous) =>
               previous.map((entry) =>
@@ -1252,6 +1516,18 @@ export function ComparatorApp() {
         return
       }
 
+      const completedRunCases = Array.from(runCaseState.values())
+      setLatestRunSnapshot(
+        buildBenchmarkRunSnapshot({
+          cases: completedRunCases,
+          threshold,
+          weights: {
+            embedding: embeddingWeight,
+            pixel: pixelWeight,
+          },
+          modelIds: modelIdsForRun,
+        })
+      )
       setRuntimeInfo(
         `Benchmark completed with ${activeWorkers} worker${activeWorkers > 1 ? "s" : ""}.`
       )
@@ -1276,18 +1552,30 @@ export function ComparatorApp() {
       }
     }
   }, [
-    activeModelIds,
     benchmarkCases,
     embeddingRequired,
     embeddingWeight,
     modelStatus,
     pixelWeight,
+    selectedModelIds,
+    threshold,
   ])
 
   const removeBenchmarkCase = React.useCallback((id: string) => {
     setBenchmarkCases((previous) => previous.filter((entry) => entry.id !== id))
     setSelectedBenchmarkCaseId((previous) => (previous === id ? null : previous))
   }, [])
+
+  const setBenchmarkCaseExpectedOutcome = React.useCallback(
+    (id: string, expectedOutcome: ExpectedOutcome) => {
+      setBenchmarkCases((previous) =>
+        previous.map((entry) =>
+          entry.id === id ? { ...entry, expectedOutcome } : entry
+        )
+      )
+    },
+    []
+  )
 
   const selectBenchmarkCase = React.useCallback((id: string) => {
     setSelectedBenchmarkCaseId(id)
@@ -1343,14 +1631,110 @@ export function ComparatorApp() {
                 </Badge>
                 <Badge className={statusChipClass(modelStatus)}>Engine: {modelStatus}</Badge>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={clearSavedSession}
-                disabled={isComparing || isRunningBenchmark}
-              >
-                Clear saved session
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <AlertDialog
+                  open={isModelStatusDialogOpen}
+                  onOpenChange={setIsModelStatusDialogOpen}
+                >
+                  <AlertDialogTrigger asChild>
+                    <Button variant="outline" size="sm">
+                      Model status
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent className="max-h-[85vh] max-w-4xl overflow-hidden">
+                    <AlertDialogHeader className="items-start text-left">
+                      <AlertDialogTitle>Model runtime status</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        Live status from model initialization and metadata fetching.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <div className="overflow-auto rounded-md border border-border">
+                      <table className="min-w-full border-collapse text-xs">
+                        <thead className="bg-muted/40 text-muted-foreground">
+                          <tr>
+                            <th className="px-2 py-2 text-left font-medium">Model</th>
+                            <th className="px-2 py-2 text-left font-medium">Status</th>
+                            <th className="px-2 py-2 text-left font-medium">Progress</th>
+                            <th className="px-2 py-2 text-left font-medium">Size</th>
+                            <th className="px-2 py-2 text-left font-medium">Source</th>
+                            <th className="px-2 py-2 text-left font-medium">Updated</th>
+                            <th className="px-2 py-2 text-left font-medium">Error</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {modelStatusRows.map((status) => (
+                            <tr key={status.modelId} className="border-t border-border/60">
+                              <td className="px-2 py-2 align-top text-foreground">
+                                {modelLabelFromId(status.modelId)}
+                              </td>
+                              <td className="px-2 py-2 align-top">
+                                <Badge
+                                  variant="outline"
+                                  className={modelPhaseBadgeClass(status.phase)}
+                                >
+                                  {status.phase}
+                                </Badge>
+                              </td>
+                              <td className="max-w-[220px] px-2 py-2 align-top text-muted-foreground">
+                                {typeof status.progress === "number" ? (
+                                  <div className="space-y-1">
+                                    <div className="h-1.5 overflow-hidden rounded bg-muted">
+                                      <div
+                                        className="h-full rounded bg-primary"
+                                        style={{
+                                          width: `${Math.max(
+                                            0,
+                                            Math.min(100, status.progress)
+                                          )}%`,
+                                        }}
+                                      />
+                                    </div>
+                                    <p>{status.progress.toFixed(0)}%</p>
+                                    {status.progressFile ? (
+                                      <p className="truncate">{status.progressFile}</p>
+                                    ) : null}
+                                  </div>
+                                ) : (
+                                  "-"
+                                )}
+                              </td>
+                              <td className="px-2 py-2 align-top text-foreground">
+                                {formatBytes(status.sizeBytes)}
+                              </td>
+                              <td className="px-2 py-2 align-top text-muted-foreground">
+                                {status.sizeSource === "huggingface-api"
+                                  ? "huggingface-api"
+                                  : status.progressTotal
+                                    ? "transformers-download"
+                                    : "unknown"}
+                              </td>
+                              <td className="px-2 py-2 align-top text-muted-foreground">
+                                {status.updatedAt
+                                  ? new Date(status.updatedAt).toLocaleTimeString()
+                                  : "-"}
+                              </td>
+                              <td className="max-w-[280px] px-2 py-2 align-top text-destructive">
+                                {status.error ?? "-"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Close</AlertDialogCancel>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={clearSavedSession}
+                  disabled={isComparing || isRunningBenchmark}
+                >
+                  Clear saved session
+                </Button>
+              </div>
             </div>
           </CardHeader>
         </Card>
@@ -1603,6 +1987,9 @@ export function ComparatorApp() {
               <p className="text-xs text-muted-foreground">
                 Pick one or more models. To stay conservative, the final model score uses the lowest score among selected models.
               </p>
+              <p className="text-xs text-muted-foreground">
+                Maximum selected models: {MODEL_SELECTION_MAX_MODELS}.
+              </p>
               <div className="rounded-lg border border-border bg-background/80 p-3">
                 <p className="text-xs font-medium text-foreground">Add custom model</p>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -1644,6 +2031,17 @@ export function ComparatorApp() {
                 {selectableModelEntries.map((entry) => {
                   const checked = selectedModelIds.includes(entry.id)
                   const isLoaded = loadedModelIds.includes(entry.id)
+                  const runtimeStatus =
+                    modelRuntimeStatuses[entry.id] ??
+                    ({
+                      modelId: entry.id,
+                      phase: isLoaded ? "ready" : "idle",
+                      sizeBytes: null,
+                      sizeSource: "unknown",
+                      error: null,
+                      updatedAt: 0,
+                    } satisfies ModelRuntimeStatus)
+                  const progress = modelDownloadProgress[entry.id]
                   return (
                     <label
                       key={entry.id}
@@ -1668,17 +2066,27 @@ export function ComparatorApp() {
                             <p className="text-xs text-muted-foreground">{entry.notes}</p>
                           </div>
                         </div>
-                        <Badge
-                          variant="outline"
-                          className={
-                            isLoaded
-                              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                              : "border-border text-muted-foreground"
-                          }
-                        >
-                          {isLoaded ? "loaded" : "idle"}
-                        </Badge>
+                        <div className="flex flex-col items-end gap-1">
+                          <Badge
+                            variant="outline"
+                            className={modelPhaseBadgeClass(runtimeStatus.phase)}
+                          >
+                            {runtimeStatus.phase}
+                          </Badge>
+                          <Badge variant="outline" className="border-border text-muted-foreground">
+                            {formatBytes(runtimeStatus.sizeBytes)}
+                          </Badge>
+                        </div>
                       </div>
+                      {runtimeStatus.error ? (
+                        <p className="text-xs text-destructive">{runtimeStatus.error}</p>
+                      ) : null}
+                      {typeof progress?.progress === "number" &&
+                      runtimeStatus.phase !== "ready" ? (
+                        <p className="text-xs text-muted-foreground">
+                          download {progress.progress.toFixed(0)}%
+                        </p>
+                      ) : null}
                     </label>
                   )
                 })}
@@ -1763,31 +2171,7 @@ export function ComparatorApp() {
                       : "Add source-target pairs to enable benchmark analytics."}
                   </p>
                 </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <Badge variant="outline">Cases: {benchmarkStats.total}</Badge>
-                  <Badge variant="outline">
-                    Processed: {benchmarkStats.processedCount}
-                  </Badge>
-                  <Badge variant="outline">
-                    Scored: {benchmarkStats.finished}
-                  </Badge>
-                  <Badge variant="outline">
-                    Threshold: {threshold.toFixed(2)}
-                  </Badge>
-                  <Badge variant="outline">
-                    Results view: {selectedBenchmarkCase ? "Pinned benchmark case" : "Live compare"}
-                  </Badge>
-                  <Badge
-                    className={
-                      isRunningBenchmark
-                        ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-200"
-                        : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                    }
-                  >
-                    {isRunningBenchmark ? "Run state: active" : "Run state: idle"}
-                  </Badge>
-                </div>
+                <Badge variant="outline">Threshold {threshold.toFixed(2)}</Badge>
               </div>
               {selectedBenchmarkCase ? (
                 <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/10 px-2 py-1">
@@ -1821,6 +2205,21 @@ export function ComparatorApp() {
                 <p className="text-xs text-muted-foreground">
                   Progress: {(benchmarkStats.progress * 100).toFixed(0)}%
                 </p>
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">
+                    View: {selectedBenchmarkCase ? "Pinned case" : "Live compare"}
+                  </Badge>
+                  <Badge
+                    className={
+                      isRunningBenchmark
+                        ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-200"
+                        : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                    }
+                  >
+                    {isRunningBenchmark ? "Run active" : "Run idle"}
+                  </Badge>
+                  <Badge variant="outline">Scored: {benchmarkStats.finished}</Badge>
+                </div>
               </div>
 
               <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
@@ -1889,6 +2288,17 @@ export function ComparatorApp() {
               >
                 {isRunningBenchmark ? "Running benchmark..." : "Run benchmark suite"}
               </Button>
+              <Button variant="outline" asChild>
+                <Link
+                  href="/analytics"
+                  onClick={() => {
+                    saveLiveBenchmarkSnapshot(analyticsSnapshotFromCurrentResults)
+                    setLatestRunSnapshot(analyticsSnapshotFromCurrentResults)
+                  }}
+                >
+                  Open analytics
+                </Link>
+              </Button>
               <Button
                 variant="outline"
                 onClick={() => {
@@ -1903,8 +2313,17 @@ export function ComparatorApp() {
 
             {benchmarkCases.length ? (
               <div className="space-y-3">
-                {benchmarkCases.map((item, index) => (
-                  <div
+                {benchmarkCases.map((item, index) => {
+                  const predictedOutcome = item.result
+                    ? predictedOutcomeFromScore(item.result.hybridSimilarity, threshold)
+                    : null
+                  const outcomeCorrect =
+                    predictedOutcome === null
+                      ? null
+                      : isCorrectOutcome(item.expectedOutcome, predictedOutcome)
+
+                  return (
+                    <div
                     key={item.id}
                     className={`space-y-3 rounded-lg border p-3 transition-colors md:p-4 ${
                       selectedBenchmarkCaseId === item.id
@@ -1920,7 +2339,7 @@ export function ComparatorApp() {
                         selectBenchmarkCase(item.id)
                       }
                     }}
-                  >
+                    >
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <div className="space-y-1">
                         <p className="text-sm font-medium text-foreground">
@@ -1937,6 +2356,9 @@ export function ComparatorApp() {
                             showing in results
                           </Badge>
                         ) : null}
+                        <Badge variant="outline">
+                          expected: {formatOutcome(item.expectedOutcome)}
+                        </Badge>
                         <Badge className={benchmarkStatusChipClass(item.status)}>
                           status: {item.status}
                         </Badge>
@@ -1952,6 +2374,22 @@ export function ComparatorApp() {
                             {isPass(item.result.hybridSimilarity, threshold)
                               ? "PASS"
                               : "FAIL"}
+                          </Badge>
+                        ) : null}
+                        {predictedOutcome ? (
+                          <Badge variant="outline">
+                            predicted: {formatOutcome(predictedOutcome)}
+                          </Badge>
+                        ) : null}
+                        {outcomeCorrect !== null ? (
+                          <Badge
+                            className={
+                              outcomeCorrect
+                                ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                                : "border border-destructive/40 bg-destructive/10 text-destructive"
+                            }
+                          >
+                            correctness: {outcomeCorrect ? "correct" : "incorrect"}
                           </Badge>
                         ) : null}
                       </div>
@@ -2084,6 +2522,25 @@ export function ComparatorApp() {
                                       {model.hybridSimilarity.toFixed(4)}
                                     </p>
                                     <p className="text-muted-foreground">
+                                      predicted{" "}
+                                      {formatOutcome(
+                                        predictedOutcomeFromScore(
+                                          model.hybridSimilarity,
+                                          threshold
+                                        )
+                                      )}{" "}
+                                      |{" "}
+                                      {isCorrectOutcome(
+                                        item.expectedOutcome,
+                                        predictedOutcomeFromScore(
+                                          model.hybridSimilarity,
+                                          threshold
+                                        )
+                                      )
+                                        ? "correct"
+                                        : "incorrect"}
+                                    </p>
+                                    <p className="text-muted-foreground">
                                       latency {model.latencyMs} ms | embedding cache{" "}
                                       {model.embeddingCacheHit ? "hit" : "miss"}
                                     </p>
@@ -2102,6 +2559,26 @@ export function ComparatorApp() {
                       </div>
 
                       <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
+                        <Select
+                          value={item.expectedOutcome}
+                          onValueChange={(nextValue) => {
+                            if (nextValue === "match" || nextValue === "non-match") {
+                              setBenchmarkCaseExpectedOutcome(item.id, nextValue)
+                            }
+                          }}
+                        >
+                          <SelectTrigger
+                            size="sm"
+                            onClick={(event) => event.stopPropagation()}
+                            className="min-w-[160px]"
+                          >
+                            <SelectValue placeholder="Expected outcome" />
+                          </SelectTrigger>
+                          <SelectContent onClick={(event) => event.stopPropagation()}>
+                            <SelectItem value="match">Expected: match</SelectItem>
+                            <SelectItem value="non-match">Expected: non-match</SelectItem>
+                          </SelectContent>
+                        </Select>
                         <Button
                           variant="outline"
                           size="sm"
@@ -2129,8 +2606,9 @@ export function ComparatorApp() {
                     {item.error ? (
                       <p className="text-xs text-destructive">{item.error}</p>
                     ) : null}
-                  </div>
-                ))}
+                    </div>
+                  )
+                })}
               </div>
             ) : (
               <p className="rounded-md border border-border bg-muted/20 px-3 py-4 text-sm text-muted-foreground">

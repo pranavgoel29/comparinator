@@ -2,12 +2,20 @@
 
 import { RawImage, env, pipeline } from "@huggingface/transformers"
 
+import {
+  MODEL_ID_MAX_LENGTH,
+  MODEL_SELECTION_MAX_MODELS,
+  normalizeUniqueModelIds,
+  validateModelId,
+} from "@/lib/comparator/model-id"
 import { MODEL_CONFIG } from "@/lib/comparator/model-config"
 import { cosineSimilarity, hybridSimilarity, pixelSimilarity } from "@/lib/comparator/metrics"
 import type {
   CompareImagePayload,
   CompareWeights,
   CompareResult,
+  ModelDownloadProgress,
+  ModelRuntimeStatus,
   PerModelScore,
   WorkerRequest,
   WorkerResponse,
@@ -25,6 +33,8 @@ const embeddingCache = new Map<string, number[]>()
 const pixelCache = new Map<string, number>()
 const EMBEDDING_CACHE_LIMIT = 512
 const PIXEL_CACHE_LIMIT = 512
+const MAX_COMPARE_SIDE = 2048
+const HUGGING_FACE_METADATA_TIMEOUT_MS = 5000
 
 const createPipeline = pipeline as unknown as (
   task: string,
@@ -36,10 +46,98 @@ function postMessageSafe(message: WorkerResponse) {
   self.postMessage(message)
 }
 
-function uniqueModelIds(modelIds: string[]) {
-  return Array.from(
-    new Set(modelIds.map((value) => value.trim()).filter(Boolean))
-  )
+function createModelStatus(
+  modelId: string,
+  phase: ModelRuntimeStatus["phase"],
+  options?: {
+    sizeBytes?: number | null
+    sizeSource?: ModelRuntimeStatus["sizeSource"]
+    error?: string | null
+  }
+): ModelRuntimeStatus {
+  return {
+    modelId,
+    phase,
+    sizeBytes: options?.sizeBytes ?? null,
+    sizeSource: options?.sizeSource ?? "unknown",
+    error: options?.error ?? null,
+    updatedAt: Date.now(),
+  }
+}
+
+function postModelStatus(status: ModelRuntimeStatus) {
+  postMessageSafe({ type: "model-status", payload: status })
+}
+
+function normalizeWorkerError(reason: unknown, fallback: string) {
+  if (!(reason instanceof Error) || !reason.message.trim()) {
+    return fallback
+  }
+  const normalized = reason.message.replace(/\s+/g, " ").trim()
+  return normalized.length > 180 ? `${normalized.slice(0, 177)}...` : normalized
+}
+
+function buildHfModelMetadataUrl(modelId: string) {
+  const [owner, repo] = modelId.split("/")
+  return `https://huggingface.co/api/models/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+}
+
+function parseModelSizeBytes(metadata: unknown): number | null {
+  if (!metadata || typeof metadata !== "object") {
+    return null
+  }
+
+  const record = metadata as Record<string, unknown>
+  const safetensors = record.safetensors
+  if (
+    safetensors &&
+    typeof safetensors === "object" &&
+    typeof (safetensors as Record<string, unknown>).total === "number" &&
+    Number.isFinite((safetensors as Record<string, unknown>).total)
+  ) {
+    return Math.max(0, Math.round((safetensors as Record<string, number>).total))
+  }
+
+  const siblings = record.siblings
+  if (!Array.isArray(siblings)) {
+    return null
+  }
+
+  const sizes = siblings
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null
+      }
+      const size = (entry as Record<string, unknown>).size
+      return typeof size === "number" && Number.isFinite(size) && size >= 0
+        ? Math.round(size)
+        : null
+    })
+    .filter((value): value is number => value !== null)
+
+  if (!sizes.length) {
+    return null
+  }
+
+  return sizes.reduce((sum, value) => sum + value, 0)
+}
+
+async function fetchModelSizeBytes(modelId: string) {
+  const controller = new AbortController()
+  const timeoutId = self.setTimeout(() => controller.abort(), HUGGING_FACE_METADATA_TIMEOUT_MS)
+  try {
+    const response = await fetch(buildHfModelMetadataUrl(modelId), {
+      method: "GET",
+      signal: controller.signal,
+    })
+    if (!response.ok) {
+      throw new Error(`Metadata request failed (${response.status})`)
+    }
+    const data = await response.json()
+    return parseModelSizeBytes(data)
+  } finally {
+    self.clearTimeout(timeoutId)
+  }
 }
 
 function nowMs() {
@@ -118,49 +216,150 @@ async function getExtractor(modelId: string) {
   return promise
 }
 
+function toFiniteNumberOrNull(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null
+}
+
+function postModelProgress(payload: ModelDownloadProgress) {
+  postMessageSafe({ type: "model-progress", payload })
+}
+
+function parseProgressStatus(value: unknown): ModelDownloadProgress["status"] | null {
+  if (value === "initiate" || value === "progress" || value === "done") {
+    return value
+  }
+  return null
+}
+
+function progressFromEvent(
+  modelId: string,
+  event: unknown
+): ModelDownloadProgress | null {
+  if (!event || typeof event !== "object") {
+    return null
+  }
+  const entry = event as Record<string, unknown>
+  const status = parseProgressStatus(entry.status)
+  if (!status) {
+    return null
+  }
+  return {
+    modelId,
+    status,
+    file: typeof entry.file === "string" ? entry.file : null,
+    progress: toFiniteNumberOrNull(entry.progress),
+    loaded: toFiniteNumberOrNull(entry.loaded),
+    total: toFiniteNumberOrNull(entry.total),
+    updatedAt: Date.now(),
+  }
+}
+
+async function getExtractorWithProgress(
+  modelId: string,
+  onProgress: (progress: ModelDownloadProgress) => void
+) {
+  const existing = extractorPromises.get(modelId)
+  if (existing) {
+    return existing
+  }
+
+  const promise = createPipeline(MODEL_CONFIG.task, modelId, {
+    quantized: MODEL_CONFIG.quantized,
+    progress_callback: (event: unknown) => {
+      const progress = progressFromEvent(modelId, event)
+      if (progress) {
+        onProgress(progress)
+      }
+    },
+  })
+
+  extractorPromises.set(modelId, promise)
+  return promise
+}
+
 async function initModels(modelIds: string[]) {
-  const ids = uniqueModelIds(modelIds)
+  const ids = normalizeUniqueModelIds(modelIds)
   if (!ids.length) {
     throw new Error("Select at least one model.")
+  }
+  if (ids.length > MODEL_SELECTION_MAX_MODELS) {
+    throw new Error(`Select at most ${MODEL_SELECTION_MAX_MODELS} models.`)
   }
 
   const loadedModelIds: string[] = []
   const failedModels: Array<{ modelId: string; error: string }> = []
+  const modelStatuses: ModelRuntimeStatus[] = []
 
-  const settled = await Promise.allSettled(
-    ids.map(async (modelId) => {
-      await getExtractor(modelId)
-      return modelId
-    })
-  )
-
-  for (let index = 0; index < settled.length; index += 1) {
-    const result = settled[index]
-    const modelId = ids[index]
-
-    if (result.status === "fulfilled") {
-      loadedModelIds.push(modelId)
+  for (const modelId of ids) {
+    const validationError = validateModelId(modelId)
+    if (validationError) {
+      const status = createModelStatus(modelId, "error", { error: validationError })
+      failedModels.push({ modelId, error: validationError })
+      modelStatuses.push(status)
+      postModelStatus(status)
       continue
     }
 
-    const reason =
-      result.reason instanceof Error
-        ? result.reason.message
-        : "Failed to initialize model"
+    let sizeBytes: number | null = null
+    let sizeSource: ModelRuntimeStatus["sizeSource"] = "unknown"
+    let metadataError: string | null = null
+    let downloadedTotalBytes = 0
 
-    failedModels.push({ modelId, error: reason })
-    extractorPromises.delete(modelId)
+    const metadataLoading = createModelStatus(modelId, "metadata-loading")
+    modelStatuses.push(metadataLoading)
+    postModelStatus(metadataLoading)
+
+    try {
+      const nextSize = await fetchModelSizeBytes(modelId)
+      if (typeof nextSize === "number") {
+        sizeBytes = nextSize
+        sizeSource = "huggingface-api"
+      }
+    } catch (error) {
+      metadataError = normalizeWorkerError(error, "Metadata fetch failed.")
+    }
+
+    const initializing = createModelStatus(modelId, "initializing", {
+      sizeBytes,
+      sizeSource,
+      error: metadataError,
+    })
+    modelStatuses.push(initializing)
+    postModelStatus(initializing)
+
+    try {
+      await getExtractorWithProgress(modelId, (progress) => {
+        postModelProgress(progress)
+        if (typeof progress.total === "number" && progress.total > downloadedTotalBytes) {
+          downloadedTotalBytes = progress.total
+        }
+      })
+      loadedModelIds.push(modelId)
+      if (!sizeBytes && downloadedTotalBytes > 0) {
+        sizeBytes = Math.round(downloadedTotalBytes)
+      }
+      const readyStatus = createModelStatus(modelId, "ready", {
+        sizeBytes,
+        sizeSource,
+        error: metadataError,
+      })
+      modelStatuses.push(readyStatus)
+      postModelStatus(readyStatus)
+    } catch (error) {
+      const reason = normalizeWorkerError(error, "Failed to initialize model.")
+      failedModels.push({ modelId, error: reason })
+      extractorPromises.delete(modelId)
+      const errorStatus = createModelStatus(modelId, "error", {
+        sizeBytes,
+        sizeSource,
+        error: metadataError ? `${reason} | ${metadataError}` : reason,
+      })
+      modelStatuses.push(errorStatus)
+      postModelStatus(errorStatus)
+    }
   }
 
-  if (!loadedModelIds.length) {
-    throw new Error(
-      failedModels.length
-        ? `Model initialization failed: ${failedModels[0].modelId}`
-        : "Model initialization failed."
-    )
-  }
-
-  return { loadedModelIds, failedModels }
+  return { loadedModelIds, failedModels, modelStatuses }
 }
 
 function imageDataFromPayload(payload: CompareImagePayload) {
@@ -297,7 +496,7 @@ async function compareRegions(
   const normalizedWeights = normalizeWeights(weights)
   const embeddingRequired = normalizedWeights.embedding > 0
   const pixelRequired = normalizedWeights.pixel > 0
-  const ids = uniqueModelIds(modelIds)
+  const ids = normalizeUniqueModelIds(modelIds)
   if (embeddingRequired && !ids.length) {
     throw new Error("Select at least one model before compare.")
   }
@@ -421,6 +620,43 @@ async function compareRegions(
   }
 }
 
+function validateCompareImagePayload(payload: unknown, label: "source" | "target") {
+  if (!payload || typeof payload !== "object") {
+    throw new Error(`Invalid compare payload: ${label} image is missing.`)
+  }
+
+  const image = payload as Partial<CompareImagePayload>
+  const width = image.width
+  const height = image.height
+  const rgba = image.rgba
+
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    typeof width !== "number" ||
+    typeof height !== "number" ||
+    width < 1 ||
+    width > MAX_COMPARE_SIDE ||
+    height < 1 ||
+    height > MAX_COMPARE_SIDE
+  ) {
+    throw new Error(
+      `Invalid compare payload: ${label} dimensions must be integers between 1 and ${MAX_COMPARE_SIDE}.`
+    )
+  }
+
+  if (!(rgba instanceof Uint8ClampedArray)) {
+    throw new Error(`Invalid compare payload: ${label} rgba must be Uint8ClampedArray.`)
+  }
+
+  const expectedLength = width * height * 4
+  if (rgba.length !== expectedLength) {
+    throw new Error(
+      `Invalid compare payload: ${label} rgba length mismatch (expected ${expectedLength}).`
+    )
+  }
+}
+
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
   try {
     if (event.data.type === "init-model") {
@@ -438,25 +674,32 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
 
     if (event.data.type === "compare") {
       const payload = event.data.payload
-      if (
-        !payload?.source ||
-        !payload?.target ||
-        !payload.source.width ||
-        !payload.source.height ||
-        !payload.target.width ||
-        !payload.target.height ||
-        !payload.source.rgba?.length ||
-        !payload.target.rgba?.length ||
-        !Array.isArray(payload?.modelIds) ||
-        !payload?.weights
-      ) {
+      if (!payload?.source || !payload?.target || !Array.isArray(payload?.modelIds) || !payload?.weights) {
         throw new Error("Invalid compare payload.")
+      }
+      validateCompareImagePayload(payload.source, "source")
+      validateCompareImagePayload(payload.target, "target")
+      if (!payload.modelIds.every((item) => typeof item === "string")) {
+        throw new Error("Invalid compare payload: modelIds must be strings.")
+      }
+      if (payload.modelIds.length > MODEL_SELECTION_MAX_MODELS) {
+        throw new Error(`Select at most ${MODEL_SELECTION_MAX_MODELS} models.`)
+      }
+      const normalizedModelIds = normalizeUniqueModelIds(payload.modelIds)
+      for (const modelId of normalizedModelIds) {
+        const idError = validateModelId(modelId)
+        if (idError) {
+          throw new Error(`Invalid model ID in compare request: ${idError}`)
+        }
+      }
+      if (payload.modelIds.some((item) => typeof item === "string" && item.length > MODEL_ID_MAX_LENGTH)) {
+        throw new Error(`Model IDs must be ${MODEL_ID_MAX_LENGTH} characters or fewer.`)
       }
 
       const result = await compareRegions(
         payload.source,
         payload.target,
-        payload.modelIds,
+        normalizedModelIds,
         payload.weights
       )
 

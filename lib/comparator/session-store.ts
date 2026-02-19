@@ -1,4 +1,10 @@
-import type { NormalizedBBox } from "@/lib/comparator/types"
+import type {
+  BenchmarkRunSnapshot,
+  CompareResult,
+  ExpectedOutcome,
+  NormalizedBBox,
+  PredictedOutcome,
+} from "@/lib/comparator/types"
 
 export type PersistedBenchmarkPreset = "fast" | "balanced" | "thorough" | "custom"
 
@@ -26,6 +32,11 @@ export type PersistedBenchmarkCaseV1 = {
     height: number
     rgba: Uint8ClampedArray
   }
+  expectedOutcome: ExpectedOutcome
+  status: "idle" | "running" | "done" | "error"
+  result: CompareResult | null
+  error: string | null
+  durationMs: number | null
 }
 
 export type PersistedSessionV1 = {
@@ -46,6 +57,7 @@ export type PersistedSessionV1 = {
   benchmark: {
     cases: PersistedBenchmarkCaseV1[]
     selectedBenchmarkCaseId: string | null
+    latestRunSnapshot: BenchmarkRunSnapshot | null
   }
 }
 
@@ -198,6 +210,341 @@ function normalizeBenchmarkCase(value: unknown): PersistedBenchmarkCaseV1 | null
       height: Math.max(1, Math.round(targetHeight)),
       rgba: targetRgba,
     },
+    expectedOutcome: normalizeExpectedOutcome(value.expectedOutcome),
+    status:
+      value.status === "running" ||
+      value.status === "done" ||
+      value.status === "error"
+        ? value.status
+        : "idle",
+    result: normalizeCompareResult(value.result),
+    error: toNonEmptyString(value.error) ?? null,
+    durationMs: (() => {
+      if (value.durationMs === null || value.durationMs === undefined) {
+        return null
+      }
+      const duration = toFiniteNumber(value.durationMs)
+      return duration === null ? null : Math.max(0, Math.round(duration))
+    })(),
+  }
+}
+
+function normalizeCompareResult(value: unknown): CompareResult | null {
+  if (!isRecord(value)) {
+    return null
+  }
+  const embeddingSimilarity = toFiniteNumber(value.embeddingSimilarity)
+  const pixelSimilarity = toFiniteNumber(value.pixelSimilarity)
+  const hybridSimilarity = toFiniteNumber(value.hybridSimilarity)
+  if (
+    embeddingSimilarity === null ||
+    pixelSimilarity === null ||
+    hybridSimilarity === null ||
+    !isRecord(value.compute) ||
+    !isRecord(value.usedWeights) ||
+    !isRecord(value.timingsMs) ||
+    !isRecord(value.cacheStats) ||
+    !Array.isArray(value.perModelScores)
+  ) {
+    return null
+  }
+
+  const computeEmbeddingSkipped = toBoolean(value.compute.embeddingSkipped)
+  const computePixelSkipped = toBoolean(value.compute.pixelSkipped)
+  const weightEmbedding = toFiniteNumber(value.usedWeights.embedding)
+  const weightPixel = toFiniteNumber(value.usedWeights.pixel)
+  const timingTotal = toFiniteNumber(value.timingsMs.total)
+  const timingPixel = toFiniteNumber(value.timingsMs.pixel)
+  const timingEmbedding = toFiniteNumber(value.timingsMs.embedding)
+  const cachePixelHit = toBoolean(value.cacheStats.pixelCacheHit)
+  const cacheEmbeddingHits = toFiniteNumber(value.cacheStats.embeddingHits)
+  const cacheEmbeddingMisses = toFiniteNumber(value.cacheStats.embeddingMisses)
+  if (
+    computeEmbeddingSkipped === null ||
+    computePixelSkipped === null ||
+    weightEmbedding === null ||
+    weightPixel === null ||
+    timingTotal === null ||
+    timingPixel === null ||
+    timingEmbedding === null ||
+    cachePixelHit === null ||
+    cacheEmbeddingHits === null ||
+    cacheEmbeddingMisses === null
+  ) {
+    return null
+  }
+
+  const perModelScores = value.perModelScores
+    .map((entry) => {
+      if (!isRecord(entry)) {
+        return null
+      }
+      const modelId = toNonEmptyString(entry.modelId)
+      const modelEmbedding = toFiniteNumber(entry.embeddingSimilarity)
+      const modelHybrid = toFiniteNumber(entry.hybridSimilarity)
+      const modelLatency = toFiniteNumber(entry.latencyMs)
+      const modelCacheHit = toBoolean(entry.embeddingCacheHit)
+      if (
+        !modelId ||
+        modelEmbedding === null ||
+        modelHybrid === null ||
+        modelLatency === null ||
+        modelCacheHit === null
+      ) {
+        return null
+      }
+      return {
+        modelId,
+        embeddingSimilarity: modelEmbedding,
+        hybridSimilarity: modelHybrid,
+        latencyMs: Math.max(0, Math.round(modelLatency)),
+        embeddingCacheHit: modelCacheHit,
+      }
+    })
+    .filter((entry): entry is NonNullable<CompareResult["perModelScores"][number]> => entry !== null)
+
+  return {
+    embeddingSimilarity,
+    pixelSimilarity,
+    hybridSimilarity,
+    compute: {
+      embeddingSkipped: computeEmbeddingSkipped,
+      pixelSkipped: computePixelSkipped,
+    },
+    aggregation:
+      value.aggregation === "minimum-across-models"
+        ? "minimum-across-models"
+        : "minimum-across-models",
+    usedWeights: {
+      embedding: Math.max(0, weightEmbedding),
+      pixel: Math.max(0, weightPixel),
+    },
+    perModelScores,
+    timingsMs: {
+      total: Math.max(0, Math.round(timingTotal)),
+      pixel: Math.max(0, Math.round(timingPixel)),
+      embedding: Math.max(0, Math.round(timingEmbedding)),
+    },
+    cacheStats: {
+      pixelCacheHit: cachePixelHit,
+      embeddingHits: Math.max(0, Math.round(cacheEmbeddingHits)),
+      embeddingMisses: Math.max(0, Math.round(cacheEmbeddingMisses)),
+    },
+  }
+}
+
+function normalizeExpectedOutcome(value: unknown): ExpectedOutcome {
+  return value === "non-match" ? "non-match" : "match"
+}
+
+function normalizePredictedOutcome(value: unknown): PredictedOutcome | null {
+  if (value === "match" || value === "non-match") {
+    return value
+  }
+  return null
+}
+
+function normalizeBenchmarkRunSnapshot(value: unknown): BenchmarkRunSnapshot | null {
+  if (!isRecord(value)) {
+    return null
+  }
+
+  const savedAt = toFiniteNumber(value.savedAt)
+  const threshold = toFiniteNumber(value.threshold)
+  const totalCases = toFiniteNumber(value.totalCases)
+  const processedCases = toFiniteNumber(value.processedCases)
+  const correctCount = toFiniteNumber(value.correctCount)
+  const incorrectCount = toFiniteNumber(value.incorrectCount)
+
+  if (
+    savedAt === null ||
+    threshold === null ||
+    totalCases === null ||
+    processedCases === null ||
+    correctCount === null ||
+    incorrectCount === null ||
+    !isRecord(value.weights)
+  ) {
+    return null
+  }
+
+  const embeddingWeight = toFiniteNumber(value.weights.embedding)
+  const pixelWeight = toFiniteNumber(value.weights.pixel)
+  const modelIds = Array.isArray(value.modelIds)
+    ? value.modelIds.filter(
+        (item): item is string => typeof item === "string" && item.trim().length > 0
+      )
+    : null
+  if (embeddingWeight === null || pixelWeight === null || !modelIds) {
+    return null
+  }
+
+  const caseOutcomes = Array.isArray(value.caseOutcomes)
+    ? value.caseOutcomes
+        .map((item) => {
+          if (!isRecord(item)) {
+            return null
+          }
+
+          const caseId = toNonEmptyString(item.caseId)
+          const label = toNonEmptyString(item.label)
+          const status = item.status === "error" ? "error" : item.status === "done" ? "done" : null
+          if (!caseId || !label || !status) {
+            return null
+          }
+
+          const predictedOutcome =
+            item.predictedOutcome === null
+              ? null
+              : normalizePredictedOutcome(item.predictedOutcome)
+          const correct =
+            item.correct === null
+              ? null
+              : toBoolean(item.correct)
+          const hybridSimilarity =
+            item.hybridSimilarity === null
+              ? null
+              : toFiniteNumber(item.hybridSimilarity)
+          const totalLatencyMs =
+            item.totalLatencyMs === null
+              ? null
+              : toFiniteNumber(item.totalLatencyMs)
+
+          if (
+            (item.predictedOutcome !== null && predictedOutcome === null) ||
+            (item.correct !== null && correct === null) ||
+            (item.hybridSimilarity !== null && hybridSimilarity === null) ||
+            (item.totalLatencyMs !== null && totalLatencyMs === null)
+          ) {
+            return null
+          }
+
+          const failingModels = Array.isArray(item.failingModels)
+            ? item.failingModels.filter(
+                (value): value is string =>
+                  typeof value === "string" && value.trim().length > 0
+              )
+            : []
+          const perModelOutcomes = Array.isArray(item.perModelOutcomes)
+            ? item.perModelOutcomes
+                .map((modelOutcome) => {
+                  if (!isRecord(modelOutcome)) {
+                    return null
+                  }
+                  const modelId = toNonEmptyString(modelOutcome.modelId)
+                  const predicted = normalizePredictedOutcome(
+                    modelOutcome.predictedOutcome
+                  )
+                  const modelCorrect = toBoolean(modelOutcome.correct)
+                  const modelHybrid = toFiniteNumber(modelOutcome.hybridSimilarity)
+                  const latencyMs = toFiniteNumber(modelOutcome.latencyMs)
+                  if (
+                    !modelId ||
+                    !predicted ||
+                    modelCorrect === null ||
+                    modelHybrid === null ||
+                    latencyMs === null
+                  ) {
+                    return null
+                  }
+                  return {
+                    modelId,
+                    predictedOutcome: predicted,
+                    correct: modelCorrect,
+                    hybridSimilarity: modelHybrid,
+                    latencyMs: Math.max(0, Math.round(latencyMs)),
+                  }
+                })
+                .filter(
+                  (entry): entry is NonNullable<
+                    BenchmarkRunSnapshot["caseOutcomes"][number]["perModelOutcomes"][number]
+                  > => entry !== null
+                )
+            : []
+
+          return {
+            caseId,
+            label,
+            status,
+            expectedOutcome: normalizeExpectedOutcome(item.expectedOutcome),
+            predictedOutcome,
+            correct,
+            hybridSimilarity,
+            totalLatencyMs:
+              totalLatencyMs === null ? null : Math.max(0, Math.round(totalLatencyMs)),
+            error: toNonEmptyString(item.error) ?? null,
+            failingModels: Array.from(new Set(failingModels)),
+            perModelOutcomes,
+          }
+        })
+        .filter(
+          (
+            item
+          ): item is NonNullable<BenchmarkRunSnapshot["caseOutcomes"][number]> =>
+            item !== null
+        )
+    : null
+
+  const perModelSummary = Array.isArray(value.perModelSummary)
+    ? value.perModelSummary
+        .map((item) => {
+          if (!isRecord(item)) {
+            return null
+          }
+          const modelId = toNonEmptyString(item.modelId)
+          const total = toFiniteNumber(item.total)
+          const correct = toFiniteNumber(item.correct)
+          const incorrect = toFiniteNumber(item.incorrect)
+          const correctnessRate = toFiniteNumber(item.correctnessRate)
+          const avgLatencyMs =
+            item.avgLatencyMs === null ? null : toFiniteNumber(item.avgLatencyMs)
+          if (
+            !modelId ||
+            total === null ||
+            correct === null ||
+            incorrect === null ||
+            correctnessRate === null ||
+            (item.avgLatencyMs !== null && avgLatencyMs === null)
+          ) {
+            return null
+          }
+
+          return {
+            modelId,
+            total: Math.max(0, Math.round(total)),
+            correct: Math.max(0, Math.round(correct)),
+            incorrect: Math.max(0, Math.round(incorrect)),
+            correctnessRate: Math.max(0, Math.min(1, correctnessRate)),
+            avgLatencyMs:
+              avgLatencyMs === null ? null : Math.max(0, Math.round(avgLatencyMs)),
+          }
+        })
+        .filter(
+          (
+            item
+          ): item is NonNullable<BenchmarkRunSnapshot["perModelSummary"][number]> =>
+            item !== null
+        )
+    : null
+
+  if (!caseOutcomes || !perModelSummary) {
+    return null
+  }
+
+  return {
+    savedAt,
+    threshold: Math.max(0, Math.min(1, threshold)),
+    weights: {
+      embedding: Math.max(0, embeddingWeight),
+      pixel: Math.max(0, pixelWeight),
+    },
+    modelIds: Array.from(new Set(modelIds)),
+    totalCases: Math.max(0, Math.round(totalCases)),
+    processedCases: Math.max(0, Math.round(processedCases)),
+    correctCount: Math.max(0, Math.round(correctCount)),
+    incorrectCount: Math.max(0, Math.round(incorrectCount)),
+    caseOutcomes,
+    perModelSummary,
   }
 }
 
@@ -275,6 +622,11 @@ function normalizePersistedSession(value: unknown): PersistedSessionV1 | null {
     value.benchmark.selectedBenchmarkCaseId === null
       ? null
       : toNonEmptyString(value.benchmark.selectedBenchmarkCaseId)
+  const latestRunSnapshot =
+    value.benchmark.latestRunSnapshot === null ||
+    value.benchmark.latestRunSnapshot === undefined
+      ? null
+      : normalizeBenchmarkRunSnapshot(value.benchmark.latestRunSnapshot)
 
   return {
     version: 1,
@@ -294,6 +646,7 @@ function normalizePersistedSession(value: unknown): PersistedSessionV1 | null {
     benchmark: {
       cases: caseList,
       selectedBenchmarkCaseId,
+      latestRunSnapshot,
     },
   }
 }
