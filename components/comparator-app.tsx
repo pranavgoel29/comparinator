@@ -31,7 +31,7 @@ function unique(ids: string[]) {
 }
 
 function createComparatorWorker() {
-  return new Worker(new URL("../../workers/embedding.worker.ts", import.meta.url), { type: "module" })
+  return new Worker(new URL("../workers/embedding.worker.ts", import.meta.url), { type: "module" })
 }
 
 export function ComparatorApp() {
