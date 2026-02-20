@@ -1,4 +1,4 @@
-<img src="app/icon.svg" width="32" height="32" alt="" />
+<img src="app/icon.svg" width="120" height="120" alt="" />
 
 # Comparinator Playground
 
