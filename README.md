@@ -1,6 +1,8 @@
+<img src="app/icon.svg" width="32" height="32" alt="" />
+
 # Comparinator Playground
 
-Browser-local image region comparator that combines vision-model embeddings with pixel-level analysis — no server-side inference required.
+**Comparinator** is a browser-local image region comparator that combines vision-model embeddings with pixel-level analysis — no server-side inference required.
 
 Upload two images, draw bounding boxes around regions of interest, and get a hybrid similarity score powered by Transformers.js running entirely in Web Workers. Save comparison cases into benchmark suites, run them in bulk, and review correctness and latency on a dedicated analytics dashboard.
 
